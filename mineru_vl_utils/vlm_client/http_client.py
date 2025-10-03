@@ -38,6 +38,7 @@ class HttpVlmClient(VlmClient):
         self,
         model_name: str | None = None,
         server_url: str | None = None,
+        server_headers: dict[str, str] | None = None,
         prompt: str = DEFAULT_USER_PROMPT,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         sampling_params: SamplingParams | None = None,
@@ -57,6 +58,7 @@ class HttpVlmClient(VlmClient):
         self.max_concurrency = max_concurrency
         self.http_timeout = http_timeout
         self.debug = debug
+        self.headers = server_headers
 
         if not server_url:
             server_url = _get_env("MINERU_VL_SERVER")
@@ -81,7 +83,7 @@ class HttpVlmClient(VlmClient):
 
     def _check_model_name(self, base_url: str, model_name: str):
         try:
-            response = httpx.get(f"{base_url}/v1/models", timeout=self.http_timeout)
+            response = httpx.get(f"{base_url}/v1/models", headers=self.headers, timeout=self.http_timeout)
         except httpx.ConnectError:
             raise ServerError(f"Failed to connect to server {base_url}. Please check if the server is running.")
         if response.status_code != 200:
@@ -98,7 +100,7 @@ class HttpVlmClient(VlmClient):
 
     def _get_model_name(self, base_url: str) -> str:
         try:
-            response = httpx.get(f"{base_url}/v1/models", timeout=self.http_timeout)
+            response = httpx.get(f"{base_url}/v1/models", headers=self.headers, timeout=self.http_timeout)
         except httpx.ConnectError:
             raise ServerError(f"Failed to connect to server {base_url}. Please check if the server is running.")
         if response.status_code != 200:
@@ -255,6 +257,7 @@ class HttpVlmClient(VlmClient):
         response = httpx.post(
             self.chat_url,
             json=request_body,
+            headers=self.headers,
             timeout=self.http_timeout,
         )
 
@@ -323,6 +326,7 @@ class HttpVlmClient(VlmClient):
             "POST",
             self.chat_url,
             json=request_body,
+            headers=self.headers,
             timeout=self.http_timeout,
         ) as response:
             for chunk in response.iter_lines():
@@ -391,10 +395,10 @@ class HttpVlmClient(VlmClient):
 
         if async_client is None:
             async with httpx.AsyncClient(timeout=self.http_timeout) as client:
-                response = await client.post(self.chat_url, json=request_body)
+                response = await client.post(self.chat_url, json=request_body, headers=self.headers)
                 response_data = self.get_response_data(response)
         else:
-            response = await async_client.post(self.chat_url, json=request_body)
+            response = await async_client.post(self.chat_url, json=request_body, headers=self.headers)
             response_data = self.get_response_data(response)
 
         if self.debug:
@@ -445,6 +449,7 @@ class HttpVlmClient(VlmClient):
 
         async with httpx.AsyncClient(
             timeout=self.http_timeout,
+            headers=self.headers,
             limits=httpx.Limits(max_connections=None, max_keepalive_connections=20),
         ) as client:
             return await gather_tasks(
@@ -503,6 +508,7 @@ class HttpVlmClient(VlmClient):
 
         async with httpx.AsyncClient(
             timeout=self.http_timeout,
+            headers=self.headers,
             limits=httpx.Limits(max_connections=None, max_keepalive_connections=20),
         ) as client:
             pending: set[asyncio.Task[tuple[int, str]]] = set()

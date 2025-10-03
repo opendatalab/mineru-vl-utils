@@ -266,6 +266,7 @@ class MinerUClient:
         backend: Literal["http-client", "transformers", "vllm-engine", "vllm-async-engine"],
         model_name: str | None = None,
         server_url: str | None = None,
+        server_headers: dict[str, str] | None = None,
         model=None,  # transformers model
         processor=None,  # transformers processor
         vllm_llm=None,  # vllm.LLM model
@@ -344,6 +345,7 @@ class MinerUClient:
             backend=backend,
             model_name=model_name,
             server_url=server_url,
+            server_headers=server_headers,
             model=model,
             processor=processor,
             vllm_llm=vllm_llm,

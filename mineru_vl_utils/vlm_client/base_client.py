@@ -144,6 +144,7 @@ def new_vlm_client(
     backend: Literal["http-client", "transformers", "vllm-engine", "vllm-async-engine"],
     model_name: str | None = None,
     server_url: str | None = None,
+    server_headers: dict[str, str] | None = None,
     model=None,  # transformers model
     processor=None,  # transformers processor
     vllm_llm=None,  # vllm.LLM model
@@ -166,6 +167,7 @@ def new_vlm_client(
         return HttpVlmClient(
             model_name=model_name,
             server_url=server_url,
+            server_headers=server_headers,
             prompt=prompt,
             system_prompt=system_prompt,
             sampling_params=sampling_params,
