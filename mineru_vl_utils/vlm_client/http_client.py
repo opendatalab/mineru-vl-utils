@@ -254,19 +254,31 @@ class HttpVlmClient(VlmClient):
                 request_text = request_text[:2048] + "...(truncated)..." + request_text[-2048:]
             print(f"Request body: {request_text}")
 
-        response = httpx.post(
-            self.chat_url,
-            json=request_body,
-            headers=self.headers,
-            timeout=self.http_timeout,
-        )
+        max_retries = 3
 
-        if self.debug:
-            print(f"Response status code: {response.status_code}")
-            print(f"Response body: {response.text}")
+        for attempt in range(max_retries):
+            try:
+                response = httpx.post(
+                    self.chat_url,
+                    json=request_body,
+                    headers=self.headers,
+                    timeout=self.http_timeout,
+                )
 
-        response_data = self.get_response_data(response)
-        return self.get_response_content(response_data)
+                if self.debug:
+                    print(f"Response status code: {response.status_code}")
+                    print(f"Response body: {response.text}")
+
+                response_data = self.get_response_data(response)
+                return self.get_response_content(response_data)
+
+            except Exception as e:
+                if self.debug:
+                    print(f"Attempt {attempt + 1}/{max_retries} failed: {e}")
+                if attempt == max_retries - 1:
+                    raise
+
+        raise RuntimeError("Unreachable code")
 
     def batch_predict(
         self,
@@ -393,19 +405,31 @@ class HttpVlmClient(VlmClient):
                 request_text = request_text[:2048] + "...(truncated)..." + request_text[-2048:]
             print(f"Request body: {request_text}")
 
-        if async_client is None:
-            async with httpx.AsyncClient(timeout=self.http_timeout) as client:
-                response = await client.post(self.chat_url, json=request_body, headers=self.headers)
-                response_data = self.get_response_data(response)
-        else:
-            response = await async_client.post(self.chat_url, json=request_body, headers=self.headers)
-            response_data = self.get_response_data(response)
+        max_retries = 3
 
-        if self.debug:
-            print(f"Response status code: {response.status_code}")
-            print(f"Response body: {response.text}")
+        for attempt in range(max_retries):
+            try:
+                if async_client is None:
+                    async with httpx.AsyncClient(timeout=self.http_timeout) as client:
+                        response = await client.post(self.chat_url, json=request_body, headers=self.headers)
+                        response_data = self.get_response_data(response)
+                else:
+                    response = await async_client.post(self.chat_url, json=request_body, headers=self.headers)
+                    response_data = self.get_response_data(response)
 
-        return self.get_response_content(response_data)
+                if self.debug:
+                    print(f"Response status code: {response.status_code}")
+                    print(f"Response body: {response.text}")
+
+                return self.get_response_content(response_data)
+
+            except Exception as e:
+                if self.debug:
+                    print(f"Attempt {attempt + 1}/{max_retries} failed: {e}")
+                if attempt == max_retries - 1:
+                    raise
+
+        raise RuntimeError("Unreachable code")
 
     async def aio_batch_predict(
         self,
