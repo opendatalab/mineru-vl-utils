@@ -1,11 +1,9 @@
 import asyncio
-import pdb
 import math
 import time
 import re
 import os
 import subprocess
-from threading import Timer
 from concurrent.futures import Executor
 from typing import Literal, Sequence
 from datetime import datetime
@@ -227,9 +225,7 @@ class MinerUClientHelper:
         blocks_list: list[list[ContentBlock]],
     ) -> list[list[ContentBlock]]:
         if executor is None:
-            return [
-                self.post_process(blocks) for blocks in blocks_list
-            ]
+            return [self.post_process(blocks) for blocks in blocks_list]
         return list(executor.map(self.post_process, blocks_list))
 
     async def aio_prepare_for_layout(
@@ -598,9 +594,7 @@ class MinerUClient:
         outputs = self.client.batch_predict(block_images, prompts, params, priority)
         for idx, output in zip(indices, outputs):
             blocks[idx].content = output
-        return self.helper.post_process(
-            blocks, block_images, indices, self.client
-        )
+        return self.helper.post_process(blocks)
 
     async def aio_two_step_extract(
         self,
