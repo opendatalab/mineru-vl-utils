@@ -18,8 +18,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: master
+          ref: main
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -37,8 +38,8 @@ jobs:
 
       - name: Commit changes
         run: |
-          git config --local user.email "${{ github.actor }}@users.noreply.github.com"
-          git config --local user.name "${{ github.actor }}"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
           git add mineru_vl_utils/version.py
           if git diff-index --quiet HEAD; then
             echo "No changes to commit"
@@ -49,10 +50,8 @@ jobs:
 
       - name: Push changes
         if: steps.commit_changes.outcome == 'success'
-        env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
-          git push origin HEAD:master
+          git push origin HEAD:main
 
   check-install:
     needs: [ update-version ]
@@ -66,7 +65,7 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
-        ref: master
+        ref: main
         fetch-depth: 0
 
     - name: Verify version.py
@@ -97,7 +96,7 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
-        ref: master
+        ref: main
         fetch-depth: 0
 
     - name: Install wheel

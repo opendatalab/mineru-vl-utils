@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mineru_vl_utils"
-version = "0.1.15"
+dynamic = ["version"]
 authors = [
   { name="Jin Zhen Jiang", email="jinzhenjiang@pjlab.org.cn" },
   { name="Zhao Xiao Meng", email="zhaoxiaomeng@pjlab.org.cn" },
@@ -48,6 +48,9 @@ lmdeploy = [
   "lmdeploy>=0.10.2",
   "qwen_vl_utils",
 ]
+
+[tool.setuptools.dynamic]
+version = { attr = "mineru_vl_utils.version.__version__" }
 
 [tool.black]
 line-length = 128
