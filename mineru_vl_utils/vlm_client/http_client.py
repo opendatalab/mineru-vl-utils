@@ -61,6 +61,13 @@ class HttpVlmClient(VlmClient):
         self.max_concurrency = max_concurrency
         self.http_timeout = http_timeout
         self.debug = debug
+
+        api_key = os.getenv("MINERU_VL_API_KEY")
+        if api_key:
+            if server_headers is None:
+                server_headers = {}
+            server_headers["Authorization"] = f"Bearer {api_key}"
+
         self.headers = server_headers
         self.retry = Retry(total=max_retries, backoff_factor=retry_backoff_factor)
 
@@ -74,6 +81,7 @@ class HttpVlmClient(VlmClient):
 
         self.server_url = server_url
 
+        model_name = model_name or os.getenv("MINERU_VL_MODEL_NAME")
         if model_name:
             self._check_model_name(self.server_url, model_name)
             self.model_name = model_name
@@ -123,7 +131,8 @@ class HttpVlmClient(VlmClient):
             raise RequestError(f"No models found in response from {base_url}. Response body: {response.text}")
         if len(models) != 1:
             raise RequestError(
-                f"Expected exactly one model from {base_url}, but got {len(models)}. Please specify the model name."
+                f"Expected exactly one model from {base_url}, but got {len(models)}. Please specify the model name"
+                f" or set the `MINERU_VL_MODEL_NAME` environment variable."
             )
         model_name = models[0].get("id", "")
         if not model_name:
