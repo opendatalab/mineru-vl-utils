@@ -86,7 +86,7 @@ class HttpVlmClient(VlmClient):
                 retry=self.retry,
                 transport=httpx.AsyncHTTPTransport(retries=self.retry, limits=self.http_limits)),
             headers=self.headers,
-            timeout=httpx.Timeout(timeout=600.0),
+            timeout=httpx.Timeout(timeout=self.http_timeout),
             limits=self.http_limits,
         )
 
