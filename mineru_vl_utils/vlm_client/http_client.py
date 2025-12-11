@@ -80,6 +80,16 @@ class HttpVlmClient(VlmClient):
         else:
             self.model_name = self._get_model_name(self.server_url)
 
+        self.http_limits = httpx.Limits(max_keepalive_connections=20, max_connections=None)
+        self._client = httpx.AsyncClient(
+            transport=RetryTransport(
+                retry=self.retry,
+                transport=httpx.AsyncHTTPTransport(retries=self.retry, limits=self.http_limits)),
+            headers=self.headers,
+            timeout=httpx.Timeout(timeout=600.0),
+            limits=self.http_limits,
+        )
+
     @property
     def chat_url(self) -> str:
         return f"{self.server_url}/v1/chat/completions"
@@ -382,7 +392,6 @@ class HttpVlmClient(VlmClient):
         prompt: str = "",
         sampling_params: SamplingParams | None = None,
         priority: int | None = None,
-        async_client: httpx.AsyncClient | None = None,
     ) -> str:
         image_format = None
         if isinstance(image, str):
@@ -406,13 +415,8 @@ class HttpVlmClient(VlmClient):
                 request_text = request_text[:2048] + "...(truncated)..." + request_text[-2048:]
             print(f"Request body: {request_text}")
 
-        if async_client is None:
-            async with httpx.AsyncClient(transport=RetryTransport(retry=self.retry), timeout=self.http_timeout) as client:
-                response = await client.post(self.chat_url, json=request_body, headers=self.headers)
-                response_data = self.get_response_data(response)
-        else:
-            response = await async_client.post(self.chat_url, json=request_body, headers=self.headers)
-            response_data = self.get_response_data(response)
+        response = await self._client.post(self.chat_url, json=request_body, headers=self.headers)
+        response_data = self.get_response_data(response)
 
         if self.debug:
             print(f"Response status code: {response.status_code}")
@@ -449,7 +453,6 @@ class HttpVlmClient(VlmClient):
             prompt: str,
             sampling_params: SamplingParams | None,
             priority: int | None,
-            async_client: httpx.AsyncClient,
         ):
             async with semaphore:
                 return await self.aio_predict(
@@ -457,28 +460,21 @@ class HttpVlmClient(VlmClient):
                     prompt=prompt,
                     sampling_params=sampling_params,
                     priority=priority,
-                    async_client=async_client,
                 )
 
-        async with httpx.AsyncClient(
-            transport=RetryTransport(retry=self.retry),
-            timeout=self.http_timeout,
-            headers=self.headers,
-            limits=httpx.Limits(max_connections=None, max_keepalive_connections=20),
-        ) as client:
-            return await gather_tasks(
-                tasks=[
-                    predict_with_semaphore(*args, client)
-                    for args in zip(
-                        images,
-                        prompts,
-                        sampling_params,
-                        priority,
-                    )
-                ],
-                use_tqdm=use_tqdm,
-                tqdm_desc=tqdm_desc,
-            )
+        return await gather_tasks(
+            tasks=[
+                predict_with_semaphore(*args)
+                for args in zip(
+                    images,
+                    prompts,
+                    sampling_params,
+                    priority,
+                )
+            ],
+            use_tqdm=use_tqdm,
+            tqdm_desc=tqdm_desc,
+        )
 
     async def aio_batch_predict_as_iter(
         self,

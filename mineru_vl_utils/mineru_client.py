@@ -454,11 +454,8 @@ class MinerUClient:
         layout_image = await self.helper.aio_prepare_for_layout(self.executor, image)
         prompt = self.prompts.get("[layout]") or self.prompts["[default]"]
         params = self.sampling_params.get("[layout]") or self.sampling_params.get("[default]")
-        if semaphore is None:
+        async with semaphore:
             output = await self.client.aio_predict(layout_image, prompt, params, priority)
-        else:
-            async with semaphore:
-                output = await self.client.aio_predict(layout_image, prompt, params, priority)
         return await self.helper.aio_parse_layout_output(self.executor, output)
 
     async def aio_batch_layout_detect(
@@ -621,7 +618,7 @@ class MinerUClient:
         priority: int | None = None,
         semaphore: asyncio.Semaphore | None = None,
     ) -> list[ContentBlock]:
-        semaphore = semaphore or asyncio.Semaphore(self.max_concurrency)
+        assert semaphore is not None
         blocks = await self.aio_layout_detect(image, priority, semaphore)
         block_images, prompts, params, indices = await self.helper.aio_prepare_for_extract(self.executor, image, blocks)
         outputs = await self.client.aio_batch_predict(block_images, prompts, params, priority, semaphore=semaphore)
