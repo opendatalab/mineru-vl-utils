@@ -60,29 +60,24 @@ class HttpVlmClient(VlmClient):
         )
         self.max_concurrency = max_concurrency
         self.debug = debug
-
-        # Work on a local copy of server_headers to avoid mutating the caller's dict.
-        headers = dict(server_headers) if server_headers is not None else None
-
-        api_key = os.getenv("MINERU_VL_API_KEY")
-        if api_key:
-            if headers is None:
-                headers = {}
-            headers["Authorization"] = f"Bearer {api_key}"
-
-        self.headers = headers
         self.retry = Retry(total=max_retries, backoff_factor=retry_backoff_factor)
 
         if not server_url:
             server_url = _get_env("MINERU_VL_SERVER")
-
         if server_url.endswith("/"):  # keep server_url if it ends with '/'
             server_url = server_url.rstrip("/")
         else:  # use base_url if it does not end with '/' (backward compatibility)
             server_url = self._get_base_url(server_url)
-
         self.server_url = server_url
-        self.server_headers = server_headers
+
+        api_key = os.getenv("MINERU_VL_API_KEY", "").strip()
+        if api_key:
+            headers = dict(server_headers) if server_headers else {}
+            headers["Authorization"] = f"Bearer {api_key}"
+            self.server_headers = headers
+        else:
+            self.server_headers = server_headers
+
         self.http_timeout = http_timeout
         self.max_retries = max_retries
         self.retry_backoff_factor = retry_backoff_factor
