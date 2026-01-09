@@ -283,8 +283,10 @@ class HttpVlmClient(VlmClient):
         content = message["content"]
         if not (content is None or isinstance(content, str)):
             raise ServerError(f"Unexpected content type: {type(content)}.")
-        end_token = "<|im_end|>"
-        if isinstance(content, str) and content.endswith(end_token):
+        # Allow the end token to be configured via environment variable, falling back to the default.
+        # Set MINERU_VLM_END_TOKEN to override or disable stripping (e.g., set to an empty string).
+        end_token = os.getenv("MINERU_VLM_END_TOKEN", "<|im_end|>")
+        if end_token and isinstance(content, str) and content.endswith(end_token):
             content = content[:-len(end_token)]
         return content or ""
 
