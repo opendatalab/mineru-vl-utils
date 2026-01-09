@@ -7,6 +7,7 @@ from typing import AsyncIterable, Iterable, Sequence
 import httpx
 from httpx_retries import Retry, RetryTransport
 from PIL import Image
+from loguru import logger
 
 from .base_client import (
     DEFAULT_SYSTEM_PROMPT,
@@ -72,6 +73,8 @@ class HttpVlmClient(VlmClient):
         api_key = os.getenv("MINERU_VL_API_KEY", "").strip()
         if api_key:
             headers = dict(server_headers) if server_headers else {}
+            if "Authorization" in headers:
+                logger.warning("Overriding existing 'Authorization' header with MINERU_VL_API_KEY from environment variable.")
             headers["Authorization"] = f"Bearer {api_key}"
             self.server_headers = headers
         else:
