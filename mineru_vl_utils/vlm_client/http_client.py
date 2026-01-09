@@ -7,6 +7,7 @@ from typing import AsyncIterable, Iterable, Sequence
 import httpx
 from httpx_retries import Retry, RetryTransport
 from PIL import Image
+from loguru import logger
 
 from .base_client import (
     DEFAULT_SYSTEM_PROMPT,
@@ -63,14 +64,22 @@ class HttpVlmClient(VlmClient):
 
         if not server_url:
             server_url = _get_env("MINERU_VL_SERVER")
-
         if server_url.endswith("/"):  # keep server_url if it ends with '/'
             server_url = server_url.rstrip("/")
         else:  # use base_url if it does not end with '/' (backward compatibility)
             server_url = self._get_base_url(server_url)
-
         self.server_url = server_url
-        self.server_headers = server_headers
+
+        api_key = os.getenv("MINERU_VL_API_KEY", "").strip()
+        if api_key:
+            headers = dict(server_headers) if server_headers else {}
+            if "Authorization" in headers:
+                logger.warning("Overriding existing 'Authorization' header with MINERU_VL_API_KEY from environment variable.")
+            headers["Authorization"] = f"Bearer {api_key}"
+            self.server_headers = headers
+        else:
+            self.server_headers = server_headers
+
         self.http_timeout = http_timeout
         self.max_retries = max_retries
         self.retry_backoff_factor = retry_backoff_factor
@@ -79,6 +88,7 @@ class HttpVlmClient(VlmClient):
         self._aio_client_sem = asyncio.Semaphore(1)
         self._aio_client_cache: dict[asyncio.AbstractEventLoop, httpx.AsyncClient] = {}
 
+        model_name = model_name or os.getenv("MINERU_VL_MODEL_NAME")
         if model_name:
             self._check_model_name(self.server_url, model_name)
             self.model_name = model_name
@@ -164,7 +174,8 @@ class HttpVlmClient(VlmClient):
             raise RequestError(f"No models found in response from {base_url}. Response body: {response.text}")
         if len(models) != 1:
             raise RequestError(
-                f"Expected exactly one model from {base_url}, but got {len(models)}. Please specify the model name."
+                f"Expected exactly one model from {base_url}, but got {len(models)}. Please specify the model name"
+                f" or set the `MINERU_VL_MODEL_NAME` environment variable."
             )
         model_name = models[0].get("id", "")
         if not model_name:
@@ -275,6 +286,11 @@ class HttpVlmClient(VlmClient):
         content = message["content"]
         if not (content is None or isinstance(content, str)):
             raise ServerError(f"Unexpected content type: {type(content)}.")
+        # Allow the end token to be configured via environment variable, falling back to the default.
+        # Set MINERU_VLM_END_TOKEN to override or disable stripping (e.g., set to an empty string).
+        end_token = os.getenv("MINERU_VLM_END_TOKEN", "<|im_end|>")
+        if end_token and isinstance(content, str) and content.endswith(end_token):
+            content = content[:-len(end_token)]
         return content or ""
 
     def predict(
