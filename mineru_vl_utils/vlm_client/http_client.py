@@ -60,7 +60,6 @@ class HttpVlmClient(VlmClient):
         )
         self.max_concurrency = max_concurrency
         self.debug = debug
-        self.retry = Retry(total=max_retries, backoff_factor=retry_backoff_factor)
 
         if not server_url:
             server_url = _get_env("MINERU_VL_SERVER")
