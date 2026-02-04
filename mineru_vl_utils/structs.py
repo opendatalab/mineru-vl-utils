@@ -18,7 +18,7 @@ class BlockType:
     REF_TEXT = "ref_text"  # 参考文献(一条)
     LIST = "list"  # 列表块(无序/有序列表)
     PHONETIC = "phonetic"  # 注音符号
-
+    LIST_ITEM = "list_item" # ??? TODO
     # captions
     TABLE_CAPTION = "table_caption"  # 表格标题
     IMAGE_CAPTION = "image_caption"  # 图像标题
