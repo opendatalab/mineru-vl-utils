@@ -1,5 +1,6 @@
 import os
 import hashlib
+import random
 from typing import Dict, Any, List, Tuple
 from PIL import Image, ImageDraw, ImageFont, ImageStat
 from .structs import ContentBlock
@@ -77,17 +78,57 @@ def get_optimal_pil_font(
 
 def get_average_color(image: Image.Image, box) -> Tuple[int, int, int]:
     """
-    Calculate the average color of a region in an image.
+    Calculate average color from 8 points around the box (corners and side midpoints), with padding.
     Args:
         image (Image.Image): The source image.
-        box (tuple): The region to crop (left, upper, right, lower).
+        box (tuple): The region (left, upper, right, lower).
     Returns:
         Tuple[int, int, int]: Average RGB color.
     """
     try:
-        region = image.crop(box)
-        stat = ImageStat.Stat(region)
-        return tuple(map(int, stat.mean[:3]))
+        left, upper, right, lower = map(int, box)
+        width, height = image.size
+        pad = 2
+
+        mid_x = (left + right) // 2
+        mid_y = (upper + lower) // 2
+
+        points = [
+            (left - pad, upper - pad),      # Top-left
+            (mid_x, upper - pad),           # Top-mid
+            (right + pad, upper - pad),     # Top-right
+            (right + pad, mid_y),           # Right-mid
+            (right + pad, lower + pad),     # Bottom-right
+            (mid_x, lower + pad),           # Bottom-mid
+            (left - pad, lower + pad),      # Bottom-left
+            (left - pad, mid_y),            # Left-mid
+        ]
+
+        valid_pixels = []
+        for px, py in points:
+
+            px = max(0, min(px, width - 1))
+            py = max(0, min(py, height - 1))
+
+            pixel = image.getpixel((px, py))
+
+            # to RGB.
+            if isinstance(pixel, int):
+                valid_pixels.append((pixel, pixel, pixel))
+            elif len(pixel) >= 3:
+                valid_pixels.append(pixel[:3])
+
+        if not valid_pixels:
+            return (255, 255, 255)
+
+        # Calculate average
+        r_sum = sum(p[0] for p in valid_pixels)
+        g_sum = sum(p[1] for p in valid_pixels)
+        b_sum = sum(p[2] for p in valid_pixels)
+        count = len(valid_pixels)
+
+        return (int(r_sum / count), int(g_sum / count), int(b_sum / count))
+
     except Exception:
         return (255, 255, 255)
 
@@ -226,20 +267,26 @@ def mask_and_crop_table_image(
         bucket_h = int(box_h // 16)
         key = (bucket_h, len(token_text))
         if key in font_cache:
-            return font_cache[key]
+            font, text_w, text_h = font_cache[key]
+            if text_w <= box_w and text_h <= box_h:
+                return font, text_w, text_h
         font, text_w, text_h = get_optimal_pil_font(
             token_text,
             box_w,
             box_h,
-            fill_ratio=0.9,
+            fill_ratio=0.7,
             min_size=4,
-            max_size=max(100, int(box_h * 0.9)),
+            max_size=max(100, int(box_h * 0.7)),
         )
+
+        if text_w > box_w or text_h > box_h:
+             pass
+
         font_cache[key] = (font, text_w, text_h)
         return font, text_w, text_h
 
-    letters = 'ACDGHKTWXY'
-    numbers = '234568'
+    letters = 'ACDGHKTWXYZ'
+    numbers = '2345678'
     
     valid_tokens = []
     for l1 in letters:
@@ -247,6 +294,8 @@ def mask_and_crop_table_image(
             for n1 in numbers:
                 for n2 in numbers:
                     valid_tokens.append(f"{l1}{l2}{n1}{n2}")
+
+    random.shuffle(valid_tokens)
     for i, img_block in enumerate(image_blocks):
         if i < len(valid_tokens):
             token_code = valid_tokens[i]
@@ -304,13 +353,7 @@ def mask_and_crop_table_image(
         # print(f"TOKENMAP:{token_map}")
 
         # 2. Mask on block image
-        pad = 5
-        image_mask_bbox = (
-            max(0, rel_x1 - pad),
-            max(0, rel_y1 - pad),
-            min(table_w, rel_x2 + pad),
-            min(table_h, rel_y2 + pad)
-        )
+        image_mask_bbox = (rel_x1, rel_y1, rel_x2, rel_y2)
         avg_color = get_average_color(masked_table_image, image_mask_bbox)
 
         draw.rectangle([rel_x1, rel_y1, rel_x2, rel_y2], fill=avg_color, outline=None)
@@ -321,6 +364,7 @@ def mask_and_crop_table_image(
         text_pos = (center_x - text_w / 2, center_y - text_h / 2)
 
         text_color = get_contrast_text_color(avg_color)
-        draw.text(text_pos, token_text, fill=text_color, font=font)
+        if text_w <= rel_x2 - rel_x1 and text_h <= rel_y2 - rel_y1:
+            draw.text(text_pos, token_text, fill=text_color, font=font)
 
     return masked_table_image, token_map
