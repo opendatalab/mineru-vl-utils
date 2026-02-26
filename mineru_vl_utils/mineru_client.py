@@ -13,7 +13,7 @@ from .structs import BLOCK_TYPES, ContentBlock
 from .vlm_client import DEFAULT_SYSTEM_PROMPT, SamplingParams, new_vlm_client
 from .vlm_client.utils import gather_tasks, get_png_bytes, get_rgb_image
 
-_layout_re = r"^<\|box_start\|>(\d+)\s+(\d+)\s+(\d+)\s+(\d+)<\|box_end\|><\|ref_start\|>(\w+?)<\|ref_end\|>(.*)$"
+_layout_re = r"<\|box_start\|>(\d+)\s+(\d+)\s+(\d+)\s+(\d+)<\|box_end\|><\|ref_start\|>(\w+?)<\|ref_end\|>(.*?)(?=<\|box_start\|>|$)"
 
 
 class MinerUSamplingParams(SamplingParams):
@@ -133,12 +133,8 @@ class MinerUClientHelper:
         return image
 
     def parse_layout_output(self, output: str) -> list[ContentBlock]:
-        blocks: list[ContentBlock] = []
-        for line in output.split("\n"):
-            match = re.match(_layout_re, line)
-            if not match:
-                print(f"Warning: line does not match layout format: {line}")
-                continue  # Skip invalid lines
+        blocks: list[ContentBlock] = [] 
+        for match in re.finditer(_layout_re, output, re.DOTALL):
             x1, y1, x2, y2, ref_type, tail = match.groups()
             bbox = _convert_bbox((x1, y1, x2, y2))
             if bbox is None:
@@ -152,7 +148,58 @@ class MinerUClientHelper:
             if angle is None:
                 print(f"Warning: no angle found in line: {line}")
             blocks.append(ContentBlock(ref_type, bbox, angle=angle))
+        
+        # Post-process blocks to handle image inside table
+        blocks = self._post_process_content_blocks(blocks)
         return blocks
+
+    def _post_process_content_blocks(self, blocks: list[ContentBlock]) -> list[ContentBlock]:
+        """
+        Post-process content blocks to handle image inside table.
+        For images inside tables, assign UIDs to image blocks.
+        """
+        # Find all table blocks
+        table_indices = [i for i, b in enumerate(blocks) if b.type == "table"]
+        
+        # For each table, find images that are inside it
+        for table_idx in table_indices:
+            table_block = blocks[table_idx]
+            tbox = table_block.bbox
+            
+            # Check all image blocks to see if they are inside this table
+            for block in blocks:
+                if block.type == "image":
+                    # Calculate overlap ratio
+                    overlap = self._calculate_overlap(block.bbox, tbox)
+                    if overlap >= 0.9:  # Threshold for image being inside table
+                        # Ensure image block has a UID
+                        if not block.uid:
+                            block.uid = self._generate_uid()
+        
+        return blocks
+
+    def _calculate_overlap(self, inner: list[float], outer: list[float]) -> float:
+        """Calculate the overlap ratio of inner box inside outer box."""
+        x1 = max(inner[0], outer[0])
+        y1 = max(inner[1], outer[1])
+        x2 = min(inner[2], outer[2])
+        y2 = min(inner[3], outer[3])
+        
+        if x2 <= x1 or y2 <= y1:
+            return 0.0
+        
+        inter_area = (x2 - x1) * (y2 - y1)
+        inner_area = (inner[2] - inner[0]) * (inner[3] - inner[1])
+        
+        return inter_area / inner_area if inner_area > 0 else 0.0
+
+    def _generate_uid(self, length: int = 4) -> str:
+        """Generate a short unique ID using uppercase letters and numbers."""
+        import random
+        letters = 'ACDGHKTWXYZ'
+        numbers = '2345678'
+        chars = letters + numbers
+        return ''.join(random.choices(chars, k=length))
 
     def prepare_for_extract(
         self,

@@ -66,6 +66,7 @@ class ContentBlock(dict):
         bbox: list[float],
         angle: Literal[None, 0, 90, 180, 270] = None,
         content: str | None = None,
+        uid: str | None = None,
     ):
         """
         Initialize a layout block.
@@ -74,6 +75,7 @@ class ContentBlock(dict):
             bbox (list[float]): Bounding box coordinates [xmin, ymin, xmax, ymax].
             angle (int or None): Rotation angle of the block. Must be one of {None, 0, 90, 180, 270}.
             content (str or None): The content of the block (if exists).
+            uid (str or None): Unique identifier for the block.
         """
         super().__init__()
 
@@ -85,11 +87,13 @@ class ContentBlock(dict):
         assert bbox[1] < bbox[3], "Bounding box y1 must be less than y2"
         assert angle in ANGLE_OPTIONS, f"Invalid angle: {angle}. Must be one of {ANGLE_OPTIONS}"
         assert content is None or isinstance(content, str), "Content must be a string or None"
+        assert uid is None or isinstance(uid, str), "UID must be a string or None"
 
         self["type"] = type
         self["bbox"] = bbox
         self["angle"] = angle
         self["content"] = content
+        self["uid"] = uid
 
     @property
     def type(self) -> str:
@@ -130,3 +134,12 @@ class ContentBlock(dict):
     def content(self, value: str | None):
         assert value is None or isinstance(value, str), "Content must be a string or None"
         self["content"] = value
+
+    @property
+    def uid(self) -> str | None:
+        return self["uid"]
+
+    @uid.setter
+    def uid(self, value: str | None):
+        assert value is None or isinstance(value, str), "UID must be a string or None"
+        self["uid"] = value
