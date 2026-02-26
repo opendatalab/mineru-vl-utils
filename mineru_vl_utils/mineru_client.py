@@ -156,9 +156,60 @@ class MinerUClientHelper:
             ref_type = ref_type.lower()
             angle = _parse_angle(tail)
             if angle is None:
-                angle = "0"
+                angle = 0
             blocks.append(ContentBlock(ref_type, bbox, angle=angle))
+        
+        # Post-process blocks to handle image inside table
+        blocks = self._post_process_content_blocks(blocks)
         return blocks
+
+    def _post_process_content_blocks(self, blocks: list[ContentBlock]) -> list[ContentBlock]:
+        """
+        Post-process content blocks to handle image inside table.
+        For images inside tables, create image blocks with UIDs.
+        """
+        # Find all table blocks and image blocks
+        table_indices = [i for i, b in enumerate(blocks) if b.type == "table"]
+        
+        # For each table, find images that are inside it
+        for table_idx in table_indices:
+            table_block = blocks[table_idx]
+            tbox = table_block.bbox
+            
+            # Check all existing image blocks to see if they are inside this table
+            for block in blocks:
+                if block.type == "image":
+                    # Calculate overlap ratio
+                    overlap = self._calculate_overlap(block.bbox, tbox)
+                    if overlap >= 0.9:  # Threshold for image being inside table
+                        # Ensure image block has a UID
+                        if not block.uid:
+                            block.uid = self._generate_uid()
+        
+        return blocks
+
+    def _calculate_overlap(self, inner: list[float], outer: list[float]) -> float:
+        """Calculate the overlap ratio of inner box inside outer box."""
+        x1 = max(inner[0], outer[0])
+        y1 = max(inner[1], outer[1])
+        x2 = min(inner[2], outer[2])
+        y2 = min(inner[3], outer[3])
+        
+        if x2 <= x1 or y2 <= y1:
+            return 0.0
+        
+        inter_area = (x2 - x1) * (y2 - y1)
+        inner_area = (inner[2] - inner[0]) * (inner[3] - inner[1])
+        
+        return inter_area / inner_area if inner_area > 0 else 0.0
+
+    def _generate_uid(self, length: int = 4) -> str:
+        """Generate a short unique ID using uppercase letters and numbers."""
+        import random
+        letters = 'ACDGHKTWXYZ'
+        numbers = '2345678'
+        chars = letters + numbers
+        return ''.join(random.choices(chars, k=length))
 
     def prepare_for_extract(
         self,
