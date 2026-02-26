@@ -10,11 +10,10 @@ from loguru import logger
 
 from .post_process import post_process
 from .structs import BLOCK_TYPES, ContentBlock
-from .table_image_processor import build_table_image_map, mask_and_crop_table_image
 from .vlm_client import DEFAULT_SYSTEM_PROMPT, SamplingParams, new_vlm_client
 from .vlm_client.utils import gather_tasks, get_png_bytes, get_rgb_image
 
-_layout_re = r"<\|box_start\|>(\d+)\s+(\d+)\s+(\d+)\s+(\d+)<\|box_end\|><\|ref_start\|>(\w+?)<\|ref_end\|>(.*?)(?=<\|box_start\|>|$)"
+_layout_re = r"^<\|box_start\|>(\d+)\s+(\d+)\s+(\d+)\s+(\d+)<\|box_end\|><\|ref_start\|>(\w+?)<\|ref_end\|>(.*)$"
 
 
 class MinerUSamplingParams(SamplingParams):
@@ -96,11 +95,6 @@ class MinerUClientHelper:
         abandon_list: bool,
         abandon_paratext: bool,
         debug: bool,
-        enable_image_in_table_process: bool = True,
-        table_image_overlap_threshold: float = 0.9,
-        table_image_token_format: str = "[{idx}]",
-        table_image_output_dir: str | None = None,
-        table_image_rel_base: str | None = None,
     ) -> None:
         self.backend = backend
         self.prompts = prompts
@@ -113,13 +107,6 @@ class MinerUClientHelper:
         self.abandon_list = abandon_list
         self.abandon_paratext = abandon_paratext
         self.debug = debug
-        self.enable_image_in_table_process = enable_image_in_table_process
-        self.table_image_overlap_threshold = table_image_overlap_threshold
-        self.table_image_token_format = table_image_token_format
-        self.table_image_output_dir = table_image_output_dir
-        self.table_image_rel_base = table_image_rel_base
-
-
 
     def resize_by_need(self, image: Image.Image) -> Image.Image:
         edge_ratio = max(image.size) / min(image.size)
@@ -147,16 +134,23 @@ class MinerUClientHelper:
 
     def parse_layout_output(self, output: str) -> list[ContentBlock]:
         blocks: list[ContentBlock] = []
-        for match in re.finditer(_layout_re, output, re.DOTALL):
+        for line in output.split("\n"):
+            match = re.match(_layout_re, line)
+            if not match:
+                print(f"Warning: line does not match layout format: {line}")
+                continue  # Skip invalid lines
             x1, y1, x2, y2, ref_type, tail = match.groups()
             bbox = _convert_bbox((x1, y1, x2, y2))
             if bbox is None:
-                print(f"Warning: invalid bbox in match: {match.group(0)}")
+                print(f"Warning: invalid bbox in line: {line}")
                 continue  # Skip invalid bbox
             ref_type = ref_type.lower()
+            if ref_type not in BLOCK_TYPES:
+                print(f"Warning: unknown block type in line: {line}")
+                continue  # Skip unknown block types
             angle = _parse_angle(tail)
             if angle is None:
-                angle = 0
+                print(f"Warning: no angle found in line: {line}")
             blocks.append(ContentBlock(ref_type, bbox, angle=angle))
         
         # Post-process blocks to handle image inside table
@@ -166,9 +160,9 @@ class MinerUClientHelper:
     def _post_process_content_blocks(self, blocks: list[ContentBlock]) -> list[ContentBlock]:
         """
         Post-process content blocks to handle image inside table.
-        For images inside tables, create image blocks with UIDs.
+        For images inside tables, assign UIDs to image blocks.
         """
-        # Find all table blocks and image blocks
+        # Find all table blocks
         table_indices = [i for i, b in enumerate(blocks) if b.type == "table"]
         
         # For each table, find images that are inside it
@@ -176,7 +170,7 @@ class MinerUClientHelper:
             table_block = blocks[table_idx]
             tbox = table_block.bbox
             
-            # Check all existing image blocks to see if they are inside this table
+            # Check all image blocks to see if they are inside this table
             for block in blocks:
                 if block.type == "image":
                     # Calculate overlap ratio
@@ -224,12 +218,6 @@ class MinerUClientHelper:
         sampling_params: list[SamplingParams | None] = []
         indices: list[int] = []
         skip_list = {"image", "list", "equation_block"}
-
-        # get images in table after layout detection
-        table_to_images = {}
-        if self.enable_image_in_table_process:
-             table_to_images = build_table_image_map(blocks, self.table_image_overlap_threshold)
-
         if not_extract_list:
             for not_extract_type in not_extract_list:
                 if not_extract_type in BLOCK_TYPES:
@@ -243,34 +231,14 @@ class MinerUClientHelper:
             if block_image.width < 1 or block_image.height < 1:
                 print(f"Warning: cropped block image has invalid size {block_image.size}")
                 continue
-
-            # mask and crop table_image with image inside
-            if block.type == "table" and self.enable_image_in_table_process:
-                image_indices = table_to_images.get(idx, []) # (block_id,[])
-                if image_indices:
-                    image_blocks = [blocks[i] for i in image_indices]
-                    block_image, token_map = mask_and_crop_table_image(
-                        page_image=image,
-                        table_block=block,
-                        image_blocks=image_blocks,
-                        table_image=block_image,
-                        token_format=self.table_image_token_format,
-                        output_root=self.table_image_output_dir,
-                        rel_base=self.table_image_rel_base,
-                        table_idx=idx,
-                    )
-                    block["table_image_token_map"] = token_map # mask_token->url
-            # print(block["table_image_token_map"])
             if block.angle in [90, 180, 270]:
                 block_image = block_image.rotate(block.angle, expand=True)
             block_image = self.resize_by_need(block_image)
             if self.backend == "http-client":
                 block_image = get_png_bytes(block_image)
             block_images.append(block_image)
-
             prompt = self.prompts.get(block.type) or self.prompts["[default]"]
             prompts.append(prompt)
-
             params = self.sampling_params.get(block.type) or self.sampling_params.get("[default]")
             sampling_params.append(params)
             indices.append(idx)
@@ -278,7 +246,7 @@ class MinerUClientHelper:
 
     def post_process(self, blocks: list[ContentBlock]) -> list[ContentBlock]:
         try:
-            blocks = post_process(
+            return post_process(
                 blocks,
                 simple_post_process=self.simple_post_process,
                 handle_equation_block=self.handle_equation_block,
@@ -286,18 +254,6 @@ class MinerUClientHelper:
                 abandon_paratext=self.abandon_paratext,
                 debug=self.debug,
             )
-
-            if self.enable_image_in_table_process:
-                 for block in blocks:
-                     if block.type == "table" and block.get("table_image_token_map") and block.content:
-                         for token, url in block["table_image_token_map"].items():
-                             # block.content = block.content.replace(token, f'<img src="{url}"/>')
-                             # Use regex to allow spaces within brackets, e.g. [ AB23 ]
-                             token_inner = token[1:-1] # Remove outer brackets
-                             pattern = r'\[\s*' + re.escape(token_inner) + r'\s*\]'
-                             block.content = re.sub(pattern, f'<img src="{url}"/>', block.content)
-
-            return blocks
         except Exception as e:
             print(f"Warning: post-processing failed with error: {e}")
             return blocks
@@ -418,11 +374,6 @@ class MinerUClient:
         debug: bool = False,
         max_retries: int = 3,  # for http-client backend only
         retry_backoff_factor: float = 0.5,  # for http-client backend only
-        enable_image_in_table_process: bool = True,
-        table_image_overlap_threshold: float = 0.9,
-        table_image_token_format: str = "[{idx}]",
-        table_image_output_dir: str | None = None,
-        table_image_rel_base: str | None = None,
     ) -> None:
         env_debug_value = os.getenv('MINERU_VL_DEBUG_ENABLE', '')
         if env_debug_value:
@@ -546,11 +497,6 @@ class MinerUClient:
             abandon_list=abandon_list,
             abandon_paratext=abandon_paratext,
             debug=debug,
-            enable_image_in_table_process=enable_image_in_table_process,
-            table_image_overlap_threshold=table_image_overlap_threshold,
-            table_image_token_format=table_image_token_format,
-            table_image_output_dir=table_image_output_dir,
-            table_image_rel_base=table_image_rel_base,
         )
         self.backend = backend
         self.prompts = prompts
@@ -560,11 +506,6 @@ class MinerUClient:
         self.executor = executor
         self.use_tqdm = use_tqdm
         self.debug = debug
-        self.enable_image_in_table_process = enable_image_in_table_process
-        self.table_image_overlap_threshold = table_image_overlap_threshold
-        self.table_image_token_format = table_image_token_format
-        self.table_image_output_dir = table_image_output_dir
-        self.table_image_rel_base = table_image_rel_base
 
         if backend in ("http-client", "vllm-async-engine", "lmdeploy-engine"):
             self.batching_mode = "concurrent"
