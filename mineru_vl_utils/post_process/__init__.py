@@ -7,6 +7,7 @@ from .equation_left_right import try_match_equation_left_right
 from .equation_leq import try_fix_equation_leq
 from .equation_unbalanced_braces import try_fix_unbalanced_braces
 from .otsl2html import convert_otsl_to_html
+from .table_image_processor import post_process_table_content
 
 PARATEXT_TYPES = {
     "header",
@@ -57,6 +58,14 @@ def post_process(
     debug: bool = False,
 ) -> list[ContentBlock]:
     blocks = simple_process(blocks)
+
+    # Collect all image block UIDs
+    image_uids = {block.uid for block in blocks if block.type == "image" and block.uid}
+
+    # Post-process table content to replace [UID] tokens with img tags
+    for block in blocks:
+        if block.type == "table" and block.content:
+            block.content = post_process_table_content(block.content, image_uids)
 
     if simple_post_process:
         return blocks

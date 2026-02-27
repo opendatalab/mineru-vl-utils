@@ -271,20 +271,30 @@ def mask_table_image(
     return masked_table_image
 
 
-def post_process_table_content(content: str | None) -> str | None:
+def post_process_table_content(
+    content: str | None,
+    image_uids: set[str],
+) -> str | None:
     """
     Replace [UID] tokens with <img src="*" data-uid="UID"> tags.
+    Only replaces UIDs that belong to actual image blocks.
     
     Args:
         content: The table content string that may contain [UID] tokens.
+        image_uids: Set of valid image block UIDs.
         
     Returns:
         The processed content with tokens replaced by img tags.
     """
-    if not content:
+    if not content or not image_uids:
         return content
+    
+    def replace_token(match):
+        uid = match.group(1)
+        if uid in image_uids:
+            return f'<img src="*" data-uid="{uid}">'
+        return match.group(0)  # Keep original if not a valid image uid
     
     # Match [XXXX] format token, where X is uppercase letter or digit
     pattern = r'\[([A-Z0-9]{4})\]'
-    replacement = r'<img src="*" data-uid="\1">'
-    return re.sub(pattern, replacement, content)
+    return re.sub(pattern, replace_token, content)
