@@ -9,6 +9,7 @@ from PIL import Image
 from loguru import logger
 
 from .post_process import post_process
+from .post_process.table_image_processor import mask_table_image
 from .structs import BLOCK_TYPES, ContentBlock
 from .vlm_client import DEFAULT_SYSTEM_PROMPT, SamplingParams, new_vlm_client
 from .vlm_client.utils import gather_tasks, get_png_bytes, get_rgb_image
@@ -201,6 +202,24 @@ class MinerUClientHelper:
         chars = letters + numbers
         return ''.join(random.choices(chars, k=length))
 
+    def _get_images_inside_table(
+        self,
+        table_block: ContentBlock,
+        blocks: list[ContentBlock],
+        threshold: float = 0.9
+    ) -> list[ContentBlock]:
+        """Find image blocks that are inside a given table block."""
+        result = []
+        tbox = table_block.bbox
+        for block in blocks:
+            if block.type == "image" and block.uid:
+                overlap = self._calculate_overlap(block.bbox, tbox)
+                if overlap >= threshold:
+                    result.append(block)
+        # Sort by position (top to bottom, left to right)
+        result.sort(key=lambda b: (b.bbox[1], b.bbox[0]))
+        return result
+
     def prepare_for_extract(
         self,
         image: Image.Image,
@@ -218,6 +237,15 @@ class MinerUClientHelper:
             for not_extract_type in not_extract_list:
                 if not_extract_type in BLOCK_TYPES:
                     skip_list.add(not_extract_type)
+        
+        # Pre-compute: find images inside each table
+        table_to_images: dict[int, list[ContentBlock]] = {}
+        for idx, block in enumerate(blocks):
+            if block.type == "table":
+                inner_images = self._get_images_inside_table(block, blocks)
+                if inner_images:
+                    table_to_images[idx] = inner_images
+        
         for idx, block in enumerate(blocks):
             if block.type in skip_list:
                 continue  # Skip blocks that should not be extracted.
@@ -229,6 +257,11 @@ class MinerUClientHelper:
                 continue
             if block.angle in [90, 180, 270]:
                 block_image = block_image.rotate(block.angle, expand=True)
+            # Apply mask for table images
+            if block.type == "table" and idx in table_to_images:
+                block_image = mask_table_image(
+                    image, block, table_to_images[idx], block_image
+                )
             block_image = self.resize_by_need(block_image)
             if self.backend == "http-client":
                 block_image = get_png_bytes(block_image)
