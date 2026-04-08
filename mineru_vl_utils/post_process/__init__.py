@@ -6,6 +6,7 @@ from .equation_fix_eqqcolon import try_fix_equation_eqqcolon
 from .equation_left_right import try_match_equation_left_right
 from .equation_leq import try_fix_equation_leq
 from .equation_unbalanced_braces import try_fix_unbalanced_braces
+from .image_analysis_postprocess import process_image_or_chart
 from .otsl2html import convert_otsl_to_html
 
 PARATEXT_TYPES = {
@@ -44,6 +45,12 @@ def simple_process(blocks: list[ContentBlock]) -> list[ContentBlock]:
                 block.content = convert_otsl_to_html(block.content)
             except Exception as e:
                 print("Warning: Failed to convert OTSL to HTML: ", e)
+                print("Content: ", block.content)
+        if block.type in {"image", "chart"} and block.content:
+            try:
+                block.content = process_image_or_chart(block.content)
+            except Exception as e:
+                print("Warning: Failed to process image/chart: ", e)
                 print("Content: ", block.content)
     return blocks
 
