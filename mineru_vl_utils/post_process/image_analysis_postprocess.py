@@ -84,40 +84,94 @@ def has_malformed_markdown_table(content: str) -> bool:
 
 
 def extract_and_validate_mermaid_strict(content: str) -> str:
+    """
+    严格提取并校验 Mermaid flowchart 代码，修复常见的格式和语法问题。
+    支持修复：
+    1. 不规范的 Markdown 代码块
+    2. 声明头部拼写错误 (如 grap -> graph)
+    3. 错误的连线箭头 (如 ->, - -> 修正为 -->)
+    4. 节点 ID 中的空格 (替换为下划线)
+    5. 节点文本中的嵌套双引号 (转义为 &quot;) 和换行符问题
+    """
+    if not content or not content.strip():
+        return ""
+
     content = content.strip()
-    if not content:
-        return ""
 
-    # 2. 使用临时文件调用 mmdc 进行严格校验
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".mmd", delete=False, encoding="utf-8") as f:
-        f.write(content)
-        temp_mmd = f.name
-
-    temp_svg = temp_mmd + ".svg"
-
-    try:
-        # 调用 mmdc 尝试将其编译为 svg (静默模式)
-        # 如果格式有语法错误，mmdc 会返回非 0 的退出码
-        result = subprocess.run(
-            ["mmdc", "-i", temp_mmd, "-o", temp_svg],
-            capture_output=True,
-            text=True,
-        )
-
-        if result.returncode == 0:
-            return content  # 编译成功，格式完全正确
+    # ==========================================
+    # 步骤 1: 提取核心的 mermaid 代码
+    # ==========================================
+    mermaid_match = re.search(r"```mermaid\s*(.*?)\s*```", content, re.DOTALL)
+    if mermaid_match:
+        code = mermaid_match.group(1).strip()
+    else:
+        code_match = re.search(r"```\s*(.*?)\s*```", content, re.DOTALL)
+        if code_match:
+            code = code_match.group(1).strip()
         else:
-            # print("Mermaid Syntax Error:", result.stderr) # 调试时可取消注释查看具体报错
-            return ""  # 编译失败，返回空
+            code = content.strip()
 
-    except FileNotFoundError:
-        return ""
-    finally:
-        # 清理生成的临时文件
-        if os.path.exists(temp_mmd):
-            os.remove(temp_mmd)
-        if os.path.exists(temp_svg):
-            os.remove(temp_svg)
+    if code.lower().startswith("mermaid"):
+        code = code[7:].strip()
+
+    # ==========================================
+    # 步骤 2: 修复图表声明拼写错误
+    # ==========================================
+    # 修复常见的大小写或拼写错误
+    code = re.sub(r"^(grap|grapg|graphh)\b", "graph", code, flags=re.IGNORECASE)
+    code = re.sub(r"^(flowchar|flowchartt)\b", "flowchart", code, flags=re.IGNORECASE)
+
+    # ==========================================
+    # 步骤 3: 修复不规范的连线箭头
+    # ==========================================
+    # 修复带有意外空格的箭头: - ->, -- >, -  -> 等，统一替换为 -->
+    code = re.sub(r"-\s+->", "-->", code)
+    code = re.sub(r"--\s+>", "-->", code)
+    code = re.sub(r"-\s+-\s+>", "-->", code)
+    # 修复漏写减号的箭头 -> (使用负向后瞻 (?<![-=]) 确保前面不是 - 或 =，防止误伤正常箭头)
+    code = re.sub(r"(?<![-=])\s+->\s+", " --> ", code)
+
+    # ==========================================
+    # 步骤 4: 修复节点 ID 和 嵌套双引号
+    # ==========================================
+
+    def node_fixer(match):
+        raw_node_id = match.group(1).strip()
+        # 1. 修复节点 ID 里的空格：仅将水平空格/制表符替换为下划线，不影响换行符
+        node_id = re.sub(r"[ \t]+", "_", raw_node_id)
+
+        raw_text = match.group(2)
+
+        # 2. 如果文本为空，直接返回
+        if not raw_text:
+            return f'{node_id}[]'
+
+        # 3. 剥离原有的外层双引号
+        if raw_text.startswith('"') and raw_text.endswith('"'):
+            raw_text = raw_text[1:-1]
+
+        # 4. 转义文本内部残留的双引号！
+        safe_text = raw_text.replace('"', '&quot;')
+
+        # 5. [新增] 将物理换行符替换为 Mermaid 友好的 <br> 标签，防止渲染崩溃
+        safe_text = safe_text.replace('\n', '<br>')
+
+        # 6. 重新用标准的双引号包裹
+        return f'{node_id}["{safe_text}"]'
+
+    # 正则解析修改：
+    # 将原来的 \s 替换为 [ \t]，严格限制节点 ID 不能跨行！
+    processed_code = re.sub(
+        r'([a-zA-Z0-9_\u4e00-\u9fa5\-]+(?:[ \t]+[a-zA-Z0-9_\u4e00-\u9fa5\-]+)*)[ \t]*\[(.*?)\]', 
+        node_fixer, 
+        code, 
+        flags=re.DOTALL
+    )
+
+    # ==========================================
+    # 步骤 5: 返回标准格式
+    # ==========================================
+    return f"```mermaid\n{processed_code}\n```"
 
 
 def process_image_or_chart(content: str) -> str:
@@ -136,11 +190,11 @@ def process_image_or_chart(content: str) -> str:
     if class_name == "chemical":
         normalized_content = ""
     
-    
+
 
     # 3) flowchart 类别：严格校验并提取 mermaid
-    # if class_name == "flowchart":
-    #     normalized_content = extract_and_validate_mermaid_strict(normalized_content)
+    if class_name == "flowchart":
+        normalized_content = extract_and_validate_mermaid_strict(normalized_content)
 
     values["content"] = normalized_content
 
@@ -158,19 +212,18 @@ if __name__ == "__main__":
     content = """
 <|class_start|>flowchart<|class_end|>
 <|sub_class_start|>flowchart<|sub_class_end|>
-<|caption_start|>Text processing flowchart showing data flow from text through validation and refiners to final text after processing<|caption_end|>
+<|caption_start|>Formula处理流程图，展示formula输入经formula valid与Formula Refiner（自带Unify效果）处理并输出公式后处理的过程<|caption_end|>
 <|content_start|>
 
-```mermaid
 graph TD
-    A[text] --> B[text valid]
-    A --> C[text Refiner]
-    B --> D[Text Unifier]
-    C --> E[Text Unifier]
-    D --> F[文本后处理]
+    A[formula] --> B[formula valid]
+    A --> C[formula valid]
+    B --> D[Formula Unifier]
+    C --> E[Formula Refiner (自带Unify效果)]
+    D --> F[公式后处理]
     E --> F
-```
 
 <|content_end|>
+
     """
     print(process_image_or_chart(content))
