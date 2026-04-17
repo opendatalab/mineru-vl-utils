@@ -249,7 +249,18 @@ class MinerUClientHelper:
                 blocks.append(ContentBlock(ref_type, bbox, angle=angle))
         if not matched and output.strip():
             logger.warning("Layout output does not match expected format: {}", output)
-        return blocks
+        return self._filter_table_internal_layout_blocks(blocks)
+
+    @classmethod
+    def _filter_table_internal_layout_blocks(cls, blocks: list[ContentBlock]) -> list[ContentBlock]:
+        internal_block_indices = cls._find_covered_block_indices(
+            blocks,
+            candidate_types={"text", "equation", "equation_block"},
+            container_types={"table"},
+        )
+        if not internal_block_indices:
+            return blocks
+        return [block for idx, block in enumerate(blocks) if idx not in internal_block_indices]
 
     def prepare_for_extract(
         self,
@@ -622,7 +633,7 @@ class MinerUClient:
     # ------------------------------------------------------------------
 
     def _resolve_scored(self, scored: bool | None) -> bool:
-        return self.scored if scored is None else scored
+        return getattr(self, "scored", False) if scored is None else scored
 
     def _predict(
         self,
