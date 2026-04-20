@@ -133,9 +133,13 @@ def tag_array(node_list):
             node_stack.append([array_tag, node_idx])
         # array end
         elif node == "\\end{array}":
-            array_tag, node_idx_start = node_stack.pop()
-            node_idx_end = node_idx
-            array_list.append([array_tag, node_idx_start, node_idx_end])
+            try:
+                array_tag, node_idx_start = node_stack.pop()
+                node_idx_end = node_idx
+                array_list.append([array_tag, node_idx_start, node_idx_end])
+            except Exception as e:
+                print(f"corner case when dealing with interline-equation: {e}")
+                continue
         else:
             continue
 
