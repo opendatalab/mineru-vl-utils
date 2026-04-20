@@ -283,6 +283,7 @@ class HttpVlmClient(VlmClient):
             }
         if sp.max_new_tokens is not None:
             sp_dict["max_completion_tokens"] = sp.max_new_tokens
+            sp_dict["max_tokens"] = sp.max_new_tokens  # for compatibility
         sp_dict["skip_special_tokens"] = False
 
         if self.model_name.lower().startswith("gpt"):
