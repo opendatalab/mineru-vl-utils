@@ -127,17 +127,22 @@ def tag_array(node_list):
     array_list = []
     array_tag = 0
     for node_idx, node in enumerate(node_list):
-        # array begin
+        # array 环境开始：这里只记录结构位置，left/right 修复在后续 span 逻辑处理。
         if "\\begin{array}" in node:
             array_tag += 1
             node_stack.append([array_tag, node_idx])
-        # array end
+        # array 环境结束：顺序非法时交给调用方保留原公式，避免在坏结构上继续改写。
         elif node == "\\end{array}":
+            if not node_stack:
+                return None
             array_tag, node_idx_start = node_stack.pop()
             node_idx_end = node_idx
             array_list.append([array_tag, node_idx_start, node_idx_end])
         else:
             continue
+
+    if node_stack:
+        return None
 
     # find_contain
     for arr_idx1, arr1 in enumerate(array_list):
@@ -345,10 +350,13 @@ def clean_span(node_list, node_tag_list):
 
 
 def fix_left_right_mismatch(latex: str):
+    original_latex = latex
     latex = latex.strip()
     node_list = split_with_delimiters(latex.strip())
     node_list = [node.strip() for node in node_list if len(node) > 0]
     array_list = tag_array(node_list)
+    if array_list is None:
+        return original_latex
     array_list = sorted(array_list, key=lambda x: len(x[-1]), reverse=True)
     node_tag_list = tag_element(node_list, array_list)
     node_list_new = clean_span(node_list, node_tag_list)
