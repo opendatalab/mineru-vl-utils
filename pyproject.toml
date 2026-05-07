@@ -44,6 +44,7 @@ vllm = [
 ]
 mlx = [
     "mlx-vlm>=0.3.3,<0.4.0",
+    "mlx<=0.31.1",
 ]
 lmdeploy = [
     "lmdeploy>=0.10.2,<0.12",
