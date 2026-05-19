@@ -157,16 +157,24 @@ async def gather_tasks(
         output = await task
         return (idx, output)
 
-    pending: set[asyncio.Task[tuple[int, T]]] = set()
+    task_set: set[asyncio.Task[tuple[int, T]]] = set()
     for idx, task in enumerate(tasks):
-        pending.add(asyncio.create_task(indexed(idx, task)))
+        task_set.add(asyncio.create_task(indexed(idx, task)))
 
+    pending = set(task_set)
     outputs: list[tuple[int, T]] = []
-    with tqdm(total=len(tasks), desc=tqdm_desc, disable=not use_tqdm) as pbar:
-        while len(pending) > 0:
-            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-            outputs.extend(done_task.result() for done_task in done)
-            pbar.update(len(done))
+    try:
+        with tqdm(total=len(tasks), desc=tqdm_desc, disable=not use_tqdm) as pbar:
+            while len(pending) > 0:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                outputs.extend(done_task.result() for done_task in done)
+                pbar.update(len(done))
+    except (Exception, asyncio.CancelledError):
+        # 子任务失败或父协程取消时，先取消未完成任务，再等待各任务完成自身清理。
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*task_set, return_exceptions=True)
+        raise
 
     outputs.sort(key=lambda x: x[0])
     return [output for _, output in outputs]

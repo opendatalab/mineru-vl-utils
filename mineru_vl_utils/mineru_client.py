@@ -4,7 +4,7 @@ import os
 import re
 from concurrent.futures import Executor
 from contextlib import nullcontext
-from typing import Literal, Sequence
+from typing import Any, Callable, Literal, Sequence, TypeVar
 
 from loguru import logger
 from PIL import Image
@@ -87,6 +87,22 @@ IMAGE_CAPTION_CONTAINER_TYPES = {"image", "chart", "image_block"}
 INTERNAL_BLOCK_THRESHOLD = 0.9
 IMAGE_ANALYSIS_MIN_BLOCK_SIZE = 0.1
 IMAGE_ANALYSIS_MIN_BLOCK_AREA = 0.01
+_ExecutorResult = TypeVar("_ExecutorResult")
+
+
+async def _run_in_executor_drained(
+    executor: Executor | None,
+    func: Callable[..., _ExecutorResult],
+    *args: Any,
+) -> _ExecutorResult:
+    """取消协程时等待线程池同步任务结束，避免调用方提前释放共享资源。"""
+    loop = asyncio.get_running_loop()
+    future = loop.run_in_executor(executor, func, *args)
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        await asyncio.gather(future, return_exceptions=True)
+        raise
 
 
 def _convert_bbox(bbox: Sequence[int] | Sequence[str]) -> list[float] | None:
@@ -416,8 +432,7 @@ class MinerUClientHelper:
         executor: Executor | None,
         image: Image.Image,
     ) -> Image.Image | bytes:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(executor, self.prepare_for_layout, image)
+        return await _run_in_executor_drained(executor, self.prepare_for_layout, image)
 
     async def aio_parse_layout_output(
         self,
@@ -435,8 +450,7 @@ class MinerUClientHelper:
         not_extract_list: list[str] | None = None,
         image_analysis: bool | None = None,
     ) -> tuple[list[Image.Image | bytes], list[str], list[SamplingParams | None], list[int]]:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
+        return await _run_in_executor_drained(
             executor,
             self.prepare_for_extract,
             image,
