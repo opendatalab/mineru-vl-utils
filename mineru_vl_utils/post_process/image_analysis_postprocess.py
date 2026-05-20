@@ -271,6 +271,8 @@ def process_image_or_chart(content: str) -> dict[str, str]:
 
     class_name = values["class"].strip().lower()
     values["class"] = class_name
+    sub_class = values["sub_class"].strip().lower()
+    values["sub_class"] = sub_class
     normalized_content = values["content"]
     
     if len(normalized_content) == 0:
