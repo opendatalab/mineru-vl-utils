@@ -61,6 +61,83 @@ def _convert_endpoint(token: str, id_map: dict[str, str], declared_ids: set[str]
     return fixed
 
 
+
+def _split_mermaid_statements(line: str) -> tuple[list[str], bool]:
+    """Split Mermaid statements on top-level semicolons only."""
+    statements: list[str] = []
+    start = 0
+    in_quote = False
+    escaped = False
+    bracket_depth = 0
+    in_pipe_label = False
+
+    for idx, ch in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+
+        if in_quote:
+            if ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_quote = False
+            continue
+
+        if ch == '"':
+            in_quote = True
+            continue
+
+        if ch in "[({":
+            bracket_depth += 1
+            continue
+        if ch in "])}":
+            if bracket_depth > 0:
+                bracket_depth -= 1
+            continue
+
+        if ch == "|" and bracket_depth == 0:
+            in_pipe_label = not in_pipe_label
+            continue
+
+        if ch == ";" and bracket_depth == 0 and not in_pipe_label:
+            statements.append(line[start:idx])
+            start = idx + 1
+
+    statements.append(line[start:])
+    had_trailing_semicolon = len(statements) > 1 and not statements[-1].strip()
+    if had_trailing_semicolon:
+        statements.pop()
+    return statements, had_trailing_semicolon
+
+
+def _fix_mermaid_edge_statement(
+    statement: str,
+    id_map: dict[str, str],
+    declared_ids: set[str],
+) -> str:
+    stripped = statement.strip()
+    if "-->" not in stripped or stripped.startswith("%%"):
+        return stripped
+
+    arrow_idx = stripped.find("-->")
+    left = stripped[:arrow_idx]
+    right = stripped[arrow_idx + 3 :]
+
+    src = left.strip()
+    src_fixed = _convert_endpoint(src, id_map, declared_ids)
+
+    right_stripped = right.strip()
+    label_match = re.match(r"^\|(?P<label>.*?)\|\s*(?P<dst>.+?)\s*$", right_stripped)
+    if label_match:
+        raw_label = label_match.group("label")
+        label = _sanitize_edge_label(raw_label)
+        dst = label_match.group("dst")
+        dst_fixed = _convert_endpoint(dst, id_map, declared_ids)
+        return f"{src_fixed} -->|{label}| {dst_fixed}"
+
+    dst_fixed = _convert_endpoint(right_stripped, id_map, declared_ids)
+    return f"{src_fixed} --> {dst_fixed}"
+
 def try_fix_mermaid_node_id_legalization(content: str, debug: bool = False) -> str:
     lines = content.splitlines()
     declared_ids: set[str] = set()
@@ -84,24 +161,19 @@ def try_fix_mermaid_node_id_legalization(content: str, debug: bool = False) -> s
             out.append(line)
             continue
 
-        arrow_idx = line.find("-->")
-        left = line[:arrow_idx]
-        right = line[arrow_idx + 3 :]
+        statements, had_trailing_semicolon = _split_mermaid_statements(line)
+        fixed_statements = [
+            _fix_mermaid_edge_statement(statement, id_map, declared_ids)
+            for statement in statements
+            if statement.strip()
+        ]
+        if not fixed_statements:
+            out.append(line)
+            continue
 
-        src = left.strip()
-        src_fixed = _convert_endpoint(src, id_map, declared_ids)
-
-        right_stripped = right.strip()
-        label_match = re.match(r"^\|(?P<label>.*?)\|\s*(?P<dst>.+?)\s*$", right_stripped)
-        if label_match:
-            raw_label = label_match.group("label")
-            label = _sanitize_edge_label(raw_label)
-            dst = label_match.group("dst")
-            dst_fixed = _convert_endpoint(dst, id_map, declared_ids)
-            new_line = f"  {src_fixed} -->|{label}| {dst_fixed}"
-        else:
-            dst_fixed = _convert_endpoint(right_stripped, id_map, declared_ids)
-            new_line = f"  {src_fixed} --> {dst_fixed}"
+        new_line = "  " + "; ".join(fixed_statements)
+        if had_trailing_semicolon:
+            new_line += ";"
 
         if debug and new_line != line:
             print(f"[mermaid_node_id_legalize] {line} -> {new_line}")
@@ -111,7 +183,6 @@ def try_fix_mermaid_node_id_legalization(content: str, debug: bool = False) -> s
     if content.endswith("\n"):
         fixed += "\n"
     return fixed
-
 
 if __name__ == "__main__":
     mermaid = r'''graph TD
