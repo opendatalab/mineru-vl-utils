@@ -1,0 +1,274 @@
+import re
+
+
+_VALID_ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_EXISTING_DECL_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*[\[\(\{]")
+
+
+def _sanitize_node_id(raw_id: str) -> str:
+    parts = re.findall(r"[A-Za-z0-9]+", raw_id)
+    if parts:
+        first = parts[0]
+        tail = "".join(part.capitalize() for part in parts[1:])
+        candidate = f"{first}{tail}"
+    else:
+        candidate = re.sub(r"[^A-Za-z0-9_]", "", raw_id)
+
+    if not candidate:
+        candidate = "node"
+    if candidate[0].isdigit():
+        candidate = f"n{candidate}"
+    return candidate
+
+
+def _sanitize_edge_label(raw_label: str) -> str:
+    # Some Mermaid parsers choke on parentheses inside |...| edge labels.
+    # Remove them conservatively to keep labels parse-safe.
+    label = raw_label.replace("(", "").replace(")", "")
+    label = re.sub(r" {2,}", " ", label)
+    return label.strip()
+
+
+def _looks_plain_endpoint(token: str) -> bool:
+    if not token:
+        return False
+    return not any(ch in token for ch in '[](){}"|')
+
+
+def _convert_endpoint(token: str, id_map: dict[str, str], declared_ids: set[str]) -> str:
+    raw = token.strip()
+    if not _looks_plain_endpoint(raw):
+        return token
+
+    if _VALID_ID_RE.fullmatch(raw):
+        return raw
+
+    fixed = id_map.get(raw)
+    if fixed is None:
+        fixed = _sanitize_node_id(raw)
+        base = fixed
+        idx = 2
+        while fixed in declared_ids or fixed in id_map.values():
+            fixed = f"{base}{idx}"
+            idx += 1
+        id_map[raw] = fixed
+
+    if fixed not in declared_ids:
+        declared_ids.add(fixed)
+        # First appearance uses an explicit label to preserve original text.
+        return f'{fixed}["{raw}"]'
+
+    return fixed
+
+
+
+def _split_mermaid_statements(line: str) -> tuple[list[str], bool]:
+    """Split Mermaid statements on top-level semicolons only."""
+    statements: list[str] = []
+    start = 0
+    in_quote = False
+    escaped = False
+    bracket_depth = 0
+    in_pipe_label = False
+
+    for idx, ch in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+
+        if in_quote:
+            if ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_quote = False
+            continue
+
+        if ch == '"':
+            in_quote = True
+            continue
+
+        if ch in "[({":
+            bracket_depth += 1
+            continue
+        if ch in "])}":
+            if bracket_depth > 0:
+                bracket_depth -= 1
+            continue
+
+        if ch == "|" and bracket_depth == 0:
+            in_pipe_label = not in_pipe_label
+            continue
+
+        if ch == ";" and bracket_depth == 0 and not in_pipe_label:
+            statements.append(line[start:idx])
+            start = idx + 1
+
+    statements.append(line[start:])
+    had_trailing_semicolon = len(statements) > 1 and not statements[-1].strip()
+    if had_trailing_semicolon:
+        statements.pop()
+    return statements, had_trailing_semicolon
+
+
+def _split_edge_chain(statement: str) -> list[str]:
+    """Split Mermaid chained links on top-level arrows only."""
+    parts: list[str] = []
+    start = 0
+    in_quote = False
+    escaped = False
+    bracket_depth = 0
+    in_pipe_label = False
+    idx = 0
+
+    while idx < len(statement):
+        if escaped:
+            escaped = False
+            idx += 1
+            continue
+
+        ch = statement[idx]
+
+        if in_quote:
+            if ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_quote = False
+            idx += 1
+            continue
+
+        if ch == '"':
+            in_quote = True
+            idx += 1
+            continue
+
+        if ch in "[({":
+            bracket_depth += 1
+            idx += 1
+            continue
+        if ch in "])}":
+            if bracket_depth > 0:
+                bracket_depth -= 1
+            idx += 1
+            continue
+
+        if ch == "|" and bracket_depth == 0:
+            in_pipe_label = not in_pipe_label
+            idx += 1
+            continue
+
+        if (
+            statement.startswith("-->", idx)
+            and bracket_depth == 0
+            and not in_pipe_label
+        ):
+            parts.append(statement[start:idx])
+            start = idx + 3
+            idx += 3
+            continue
+
+        idx += 1
+
+    parts.append(statement[start:])
+    return parts
+
+
+def _fix_edge_target_segment(
+    segment: str,
+    id_map: dict[str, str],
+    declared_ids: set[str],
+) -> str:
+    segment_stripped = segment.strip()
+    label_match = re.match(r"^\|(?P<label>.*?)\|\s*(?P<dst>.+?)\s*$", segment_stripped)
+    if label_match:
+        raw_label = label_match.group("label")
+        label = _sanitize_edge_label(raw_label)
+        dst = label_match.group("dst")
+        dst_fixed = _convert_endpoint(dst, id_map, declared_ids)
+        return f"|{label}| {dst_fixed}"
+
+    return _convert_endpoint(segment_stripped, id_map, declared_ids)
+
+
+def _fix_mermaid_edge_statement(
+    statement: str,
+    id_map: dict[str, str],
+    declared_ids: set[str],
+) -> str:
+    stripped = statement.strip()
+    if "-->" not in stripped or stripped.startswith("%%"):
+        return stripped
+
+    chain_parts = _split_edge_chain(stripped)
+    if len(chain_parts) < 2:
+        return stripped
+
+    fixed = _convert_endpoint(chain_parts[0].strip(), id_map, declared_ids)
+    for segment in chain_parts[1:]:
+        target = _fix_edge_target_segment(segment, id_map, declared_ids)
+        if target.startswith("|"):
+            fixed += f" -->{target}"
+        else:
+            fixed += f" --> {target}"
+
+    return fixed
+
+def try_fix_mermaid_node_id_legalization(content: str, debug: bool = False) -> str:
+    lines = content.splitlines()
+    declared_ids: set[str] = set()
+
+    for line in lines:
+        match = _EXISTING_DECL_RE.match(line.strip())
+        if match:
+            declared_ids.add(match.group(1))
+
+    id_map: dict[str, str] = {}
+    out: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        # Keep bidirectional arrows unchanged; this fixer only normalizes single-direction edges.
+        if re.search(r"<\s*-\s*-\s*>", line):
+            out.append(line)
+            continue
+
+        if "-->" not in line or stripped.startswith("%%"):
+            out.append(line)
+            continue
+
+        statements, had_trailing_semicolon = _split_mermaid_statements(line)
+        fixed_statements = [
+            _fix_mermaid_edge_statement(statement, id_map, declared_ids)
+            for statement in statements
+            if statement.strip()
+        ]
+        if not fixed_statements:
+            out.append(line)
+            continue
+
+        new_line = "  " + "; ".join(fixed_statements)
+        if had_trailing_semicolon:
+            new_line += ";"
+
+        if debug and new_line != line:
+            print(f"[mermaid_node_id_legalize] {line} -> {new_line}")
+        out.append(new_line)
+
+    fixed = "\n".join(out)
+    if content.endswith("\n"):
+        fixed += "\n"
+    return fixed
+
+if __name__ == "__main__":
+    mermaid = r'''graph TD
+  Sunlight --> |Textured front surface\nAnti-reluctiv coating (SiNx)| Top Layer
+  Sunlight --> |Holes| Top Layer
+  Top Layer --> |Front silver fingers| Top Layer
+  Top Layer --> |Tunnel oxide-2 nm| Bottom Layer
+  Bottom Layer --> |Passivated contact reduces recombination| Top Layer
+  Bottom Layer --> |TOPCon stack\nn+ poly_Si (~100-200 nm) (electron-tunleling)| Bottom Layer
+  Bottom Layer --> |Electrons| Bottom Layer
+  Bottom Layer --> |Rear metal contact\nBusbars| Bottom Layer
+  Bottom Layer --> |Electrons| Bottom Layer
+'''
+
+    print(try_fix_mermaid_node_id_legalization(mermaid, debug=True))

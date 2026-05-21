@@ -1,6 +1,6 @@
 from loguru import logger
 
-from ..structs import ContentBlock
+from ..structs import BlockType, ContentBlock
 from .equation_big import try_fix_equation_big
 from .equation_block import do_handle_equation_block
 from .equation_delimeters import try_fix_equation_delimeters
@@ -30,6 +30,23 @@ PARATEXT_TYPES = {
     "aside_text",
     "page_footnote",
     "unknown",
+}
+
+NON_TEXT_PLACEHOLDER = "[Non-Text]"
+
+NON_TEXT_PLACEHOLDER_KEEP_TYPES = {
+    BlockType.HEADER,
+    BlockType.FOOTER,
+}
+
+NON_TEXT_PLACEHOLDER_PROTECTED_TYPES = {
+    BlockType.IMAGE,
+    BlockType.CHART,
+    BlockType.TABLE,
+    BlockType.EQUATION,
+    BlockType.LIST,
+    BlockType.IMAGE_BLOCK,
+    BlockType.EQUATION_BLOCK,
 }
 
 _OTSL_TABLE_TOKENS = ("<nl>", "<fcel>", "<ecel>", "<lcel>", "<ucel>", "<xcel>")
@@ -82,6 +99,26 @@ def _convert_pure_table_content_to_html(content: str) -> str:
 
     logger.warning("Failed to recognize pure_table format: {}", content)
     return ""
+
+
+def _cleanup_non_text_placeholder_blocks(blocks: list[ContentBlock]) -> list[ContentBlock]:
+    """清理模型输出的[Non-Text]占位块，同时保留页眉页脚的版面框。"""
+    out_blocks: list[ContentBlock] = []
+    for block in blocks:
+        content = block.content
+        if content is None or content.strip() != NON_TEXT_PLACEHOLDER:
+            out_blocks.append(block)
+            continue
+
+        if block.type in NON_TEXT_PLACEHOLDER_KEEP_TYPES:
+            block.content = ""
+            out_blocks.append(block)
+            continue
+
+        if block.type in NON_TEXT_PLACEHOLDER_PROTECTED_TYPES:
+            out_blocks.append(block)
+
+    return out_blocks
 
 
 def simple_process(
@@ -152,6 +189,8 @@ def post_process(
     for block in blocks:
         if block.type == "list_item":
             block.type = "text"
+
+    blocks = _cleanup_non_text_placeholder_blocks(blocks)
 
     if simple_post_process:
         return _finalize_simple_blocks(blocks)
