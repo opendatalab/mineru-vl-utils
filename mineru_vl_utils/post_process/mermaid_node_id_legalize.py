@@ -110,6 +110,85 @@ def _split_mermaid_statements(line: str) -> tuple[list[str], bool]:
     return statements, had_trailing_semicolon
 
 
+def _split_edge_chain(statement: str) -> list[str]:
+    """Split Mermaid chained links on top-level arrows only."""
+    parts: list[str] = []
+    start = 0
+    in_quote = False
+    escaped = False
+    bracket_depth = 0
+    in_pipe_label = False
+    idx = 0
+
+    while idx < len(statement):
+        if escaped:
+            escaped = False
+            idx += 1
+            continue
+
+        ch = statement[idx]
+
+        if in_quote:
+            if ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_quote = False
+            idx += 1
+            continue
+
+        if ch == '"':
+            in_quote = True
+            idx += 1
+            continue
+
+        if ch in "[({":
+            bracket_depth += 1
+            idx += 1
+            continue
+        if ch in "])}":
+            if bracket_depth > 0:
+                bracket_depth -= 1
+            idx += 1
+            continue
+
+        if ch == "|" and bracket_depth == 0:
+            in_pipe_label = not in_pipe_label
+            idx += 1
+            continue
+
+        if (
+            statement.startswith("-->", idx)
+            and bracket_depth == 0
+            and not in_pipe_label
+        ):
+            parts.append(statement[start:idx])
+            start = idx + 3
+            idx += 3
+            continue
+
+        idx += 1
+
+    parts.append(statement[start:])
+    return parts
+
+
+def _fix_edge_target_segment(
+    segment: str,
+    id_map: dict[str, str],
+    declared_ids: set[str],
+) -> str:
+    segment_stripped = segment.strip()
+    label_match = re.match(r"^\|(?P<label>.*?)\|\s*(?P<dst>.+?)\s*$", segment_stripped)
+    if label_match:
+        raw_label = label_match.group("label")
+        label = _sanitize_edge_label(raw_label)
+        dst = label_match.group("dst")
+        dst_fixed = _convert_endpoint(dst, id_map, declared_ids)
+        return f"|{label}| {dst_fixed}"
+
+    return _convert_endpoint(segment_stripped, id_map, declared_ids)
+
+
 def _fix_mermaid_edge_statement(
     statement: str,
     id_map: dict[str, str],
@@ -119,24 +198,19 @@ def _fix_mermaid_edge_statement(
     if "-->" not in stripped or stripped.startswith("%%"):
         return stripped
 
-    arrow_idx = stripped.find("-->")
-    left = stripped[:arrow_idx]
-    right = stripped[arrow_idx + 3 :]
+    chain_parts = _split_edge_chain(stripped)
+    if len(chain_parts) < 2:
+        return stripped
 
-    src = left.strip()
-    src_fixed = _convert_endpoint(src, id_map, declared_ids)
+    fixed = _convert_endpoint(chain_parts[0].strip(), id_map, declared_ids)
+    for segment in chain_parts[1:]:
+        target = _fix_edge_target_segment(segment, id_map, declared_ids)
+        if target.startswith("|"):
+            fixed += f" -->{target}"
+        else:
+            fixed += f" --> {target}"
 
-    right_stripped = right.strip()
-    label_match = re.match(r"^\|(?P<label>.*?)\|\s*(?P<dst>.+?)\s*$", right_stripped)
-    if label_match:
-        raw_label = label_match.group("label")
-        label = _sanitize_edge_label(raw_label)
-        dst = label_match.group("dst")
-        dst_fixed = _convert_endpoint(dst, id_map, declared_ids)
-        return f"{src_fixed} -->|{label}| {dst_fixed}"
-
-    dst_fixed = _convert_endpoint(right_stripped, id_map, declared_ids)
-    return f"{src_fixed} --> {dst_fixed}"
+    return fixed
 
 def try_fix_mermaid_node_id_legalization(content: str, debug: bool = False) -> str:
     lines = content.splitlines()

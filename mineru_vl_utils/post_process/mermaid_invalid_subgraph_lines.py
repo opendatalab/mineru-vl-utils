@@ -3,6 +3,7 @@ import re
 
 _SUBGRAPH_LINE_RE = re.compile(r"^(\s*)subgraph\s+(.+?)\s*$")
 _VALID_SUBGRAPH_ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_EXPLICIT_SUBGRAPH_ID_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(?=[\[\(])")
 
 
 def _sanitize_subgraph_id(raw: str) -> str:
@@ -17,10 +18,14 @@ def _sanitize_subgraph_id(raw: str) -> str:
 
 def _is_already_explicit_subgraph(line_body: str) -> bool:
     # e.g. subgraph id["Title"] or subgraph id("Title")
-    if "[" in line_body or "(" in line_body:
-        first = line_body.split(None, 1)[0] if line_body.strip() else ""
-        return _VALID_SUBGRAPH_ID_RE.match(first) is not None
-    return False
+    return bool(_extract_explicit_subgraph_id(line_body))
+
+
+def _extract_explicit_subgraph_id(line_body: str) -> str:
+    match = _EXPLICIT_SUBGRAPH_ID_RE.match(line_body.strip())
+    if match:
+        return match.group(1)
+    return ""
 
 
 def _build_unique_id(base_id: str, seen_ids: set[str]) -> str:
@@ -56,8 +61,9 @@ def try_fix_mermaid_invalid_subgraph_lines(content: str, debug: bool = False) ->
         indent, body = m.groups()
 
         if _is_already_explicit_subgraph(body):
-            first = body.split(None, 1)[0]
-            seen_subgraph_ids.add(first)
+            explicit_id = _extract_explicit_subgraph_id(body)
+            if explicit_id:
+                seen_subgraph_ids.add(explicit_id)
             fixed_lines.append(line)
             continue
 
