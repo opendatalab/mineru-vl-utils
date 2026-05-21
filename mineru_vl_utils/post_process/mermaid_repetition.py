@@ -26,7 +26,7 @@ _EDGE_LABELED_RE = re.compile(
 # CamelCase-style 2-char tokens inside concatenated node ids (An, Ao, Ap, ...)
 _NODE_ID_PAIR_RE = re.compile(r"[A-Z][a-z]|[A-Z]{2}")
 
-DEFAULT_MAX_NODE_ID_LEN = 32
+DEFAULT_MAX_NODE_ID_LEN = 128
 
 
 
@@ -256,12 +256,29 @@ def _detect_same_label_edge_repetition(
     return issues
 
 
+def _extract_edge_endpoint_id(segment: str) -> str:
+    """Extract the node id from one side of an edge, preserving valid chained links."""
+    cleaned = segment.strip()
+    if not cleaned:
+        return ""
+
+    # Drop an edge label from destination segments like: |label| NodeId
+    cleaned = re.sub(r"^\|[^|\n]*\|\s*", "", cleaned)
+
+    # Keep only the leading node id before any label/shape suffix, e.g. A[Start].
+    match = re.match(r"^([A-Za-z0-9_\u4e00-\u9fa5\-]+)", cleaned)
+    if match:
+        return match.group(1)
+
+    return ""
+
+
 def _detect_malformed_edge_line_issues(
     content: str,
     min_token_repeats: int,
     max_node_id_len: int,
 ) -> list[RepetitionIssue]:
-    """Detect chained arrows on one line and repetition inside swallowed node ids."""
+    """Detect repetition inside edge endpoint ids without rejecting valid chained links."""
     normalized = _normalize_escaped_newlines(content)
     issues: list[RepetitionIssue] = []
 
@@ -270,24 +287,21 @@ def _detect_malformed_edge_line_issues(
         if "-->" not in stripped:
             continue
 
-        arrow_count = stripped.count("-->")
-        if arrow_count >= 2:
-            issues.append(
-                RepetitionIssue(
-                    node_id="MALFORMED_LINE",
-                    reason="chained_arrows_on_one_line",
-                    repeat_count=arrow_count,
-                    snippet=stripped[:120],
+        if stripped.count("-->") >= 2:
+            # Mermaid allows valid chains like A --> B --> C. Split and inspect
+            # endpoint ids instead of treating chaining itself as repetition.
+            endpoint_ids = [
+                _extract_edge_endpoint_id(segment)
+                for segment in stripped.split("-->")
+            ]
+            for endpoint_id in endpoint_ids:
+                issues.extend(
+                    _detect_node_id_issues(
+                        endpoint_id,
+                        min_token_repeats=min_token_repeats,
+                        max_node_id_len=max_node_id_len,
+                    )
                 )
-            )
-            # Analyze full line: node-id repetition is hidden inside structure lines.
-            issues.extend(
-                _detect_node_id_issues(
-                    re.sub(r'\s*\[".*?"\]\s*', "", stripped),
-                    min_token_repeats=min_token_repeats,
-                    max_node_id_len=max_node_id_len,
-                )
-            )
             continue
 
         match = _EDGE_LINE_RE.match(raw_line)
