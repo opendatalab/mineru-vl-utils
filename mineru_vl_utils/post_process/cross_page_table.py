@@ -10,6 +10,7 @@ from ..structs import ContentBlock, ExtractResult
 try:
     from mineru.utils.table_merge import (
         build_table_state_from_html,
+        build_row_rendered_cell_segments,
         can_merge_by_structure,
         calculate_row_rendered_segments,
         detect_table_headers,
@@ -38,12 +39,16 @@ class _BoundaryRowContext:
     current_first_data_row_metrics: Any
     previous_last_row_rendered_segments: int
     current_first_data_row_rendered_segments: int
-    previous_last_row_texts: list[str]
-    current_first_data_row_texts: list[str]
+    previous_last_row_segments: list[Any]
+    current_first_data_row_segments: list[Any]
 
     @property
     def expanded_col_count(self) -> int:
-        return len(self.previous_last_row_texts)
+        return max((segment.end_col for segment in self.previous_last_row_segments), default=0)
+
+    @property
+    def segment_count(self) -> int:
+        return len(self.previous_last_row_segments)
 
 
 @dataclass(frozen=True)
@@ -53,7 +58,9 @@ class _MergeTask:
     prev_block_idx: int
     curr_page_idx: int
     curr_block_idx: int
+    expected_segment_count: int
     expected_expanded_col_count: int
+    previous_segment_col_ranges: list[tuple[int, int]]
 
 
 def _find_last_table_index(blocks: list[ContentBlock]) -> int | None:
@@ -141,77 +148,6 @@ def can_tables_merge_by_structure(
     return can_merge_by_structure(state2, state1, current_bbox=bbox2, previous_bbox=bbox1)
 
 
-def _extract_row_cell_texts(html: str, row_index: int) -> list[str] | None:
-    """从 HTML 表格中提取指定行的单元格文本列表（按视觉列对齐）。
-
-    通过构建完整的列占用网格来处理 rowspan/colspan，确保返回的文本列表
-    按视觉列位置对齐，而非按 <td> 元素的平坦索引。
-    """
-    try:
-        from bs4 import BeautifulSoup
-    except ImportError:
-        return None
-
-    soup = BeautifulSoup(html, "html.parser")
-    rows = soup.find_all("tr")
-    if not rows:
-        return None
-    if row_index < 0:
-        row_index += len(rows)
-    if row_index >= len(rows):
-        return None
-
-    # 构建列占用网格，跟踪每个位置被哪一行的 rowspan 占用
-    # occupied[row_idx][col_idx] = 起始行索引
-    occupied: dict[int, dict[int, int]] = {}
-    total_cols = 0
-
-    for r_idx in range(row_index + 1):
-        occupied_row = occupied.setdefault(r_idx, {})
-        col_idx = 0
-        cells = rows[r_idx].find_all(["td", "th"])
-        for cell in cells:
-            # 跳过被之前行 rowspan 占用的列
-            while col_idx in occupied_row:
-                col_idx += 1
-            colspan = int(cell.get("colspan", 1))
-            rowspan = int(cell.get("rowspan", 1))
-            # 标记被当前单元格占用的所有位置（记录起始行）
-            for ro in range(rowspan):
-                target_idx = r_idx + ro
-                occ = occupied.setdefault(target_idx, {})
-                for c in range(col_idx, col_idx + colspan):
-                    occ[c] = r_idx  # 记录是哪一行开始的
-            col_idx += colspan
-            total_cols = max(total_cols, col_idx)
-
-    if total_cols == 0:
-        return None
-
-    # 提取目标行中每个单元格到视觉列的映射
-    target_row = rows[row_index]
-    target_cells = target_row.find_all(["td", "th"])
-    if not target_cells:
-        return None
-
-    # 将单元格文本映射到视觉列位置
-    result = [""] * total_cols
-    target_occupied = occupied.get(row_index, {})
-    col_idx = 0
-    for cell in target_cells:
-        # 跳过被之前行 rowspan 占用的列（起始行 < 当前行）
-        while col_idx < total_cols and col_idx in target_occupied and target_occupied[col_idx] < row_index:
-            col_idx += 1
-        if col_idx >= total_cols:
-            break
-        colspan = int(cell.get("colspan", 1))
-        text = cell.get_text().strip()
-        result[col_idx] = text
-        col_idx += colspan
-
-    return result
-
-
 def _build_boundary_row_context(html1: str, html2: str) -> _BoundaryRowContext | None:
     """构建跨页表格边界行的上下文信息。"""
     states = _build_table_states(html1, html2)
@@ -225,9 +161,9 @@ def _build_boundary_row_context(html1: str, html2: str) -> _BoundaryRowContext |
     if previous_last_row_metrics is None or current_first_data_row_metrics is None:
         return None
 
-    previous_last_row_texts = _extract_row_cell_texts(html1, previous_last_row_metrics.row_idx)
-    current_first_data_row_texts = _extract_row_cell_texts(html2, current_first_data_row_metrics.row_idx)
-    if previous_last_row_texts is None or current_first_data_row_texts is None:
+    previous_last_row_segments = build_row_rendered_cell_segments(state1.rows, previous_last_row_metrics.row_idx)
+    current_first_data_row_segments = build_row_rendered_cell_segments(state2.rows, current_first_data_row_metrics.row_idx)
+    if not previous_last_row_segments or not current_first_data_row_segments:
         return None
 
     previous_last_row_rendered_segments = calculate_row_rendered_segments(state1.rows, previous_last_row_metrics.row_idx)
@@ -241,8 +177,8 @@ def _build_boundary_row_context(html1: str, html2: str) -> _BoundaryRowContext |
         current_first_data_row_metrics=current_first_data_row_metrics,
         previous_last_row_rendered_segments=previous_last_row_rendered_segments,
         current_first_data_row_rendered_segments=current_first_data_row_rendered_segments,
-        previous_last_row_texts=previous_last_row_texts,
-        current_first_data_row_texts=current_first_data_row_texts,
+        previous_last_row_segments=previous_last_row_segments,
+        current_first_data_row_segments=current_first_data_row_segments,
     )
 
 
@@ -257,13 +193,13 @@ def build_cell_merge_prompt(
     Returns:
         格式化的 prompt 字符串，或 None（无法提取有效数据时）
     """
-    last_row_texts = context.previous_last_row_texts
-    first_data_row_texts = context.current_first_data_row_texts
+    last_row_texts = [segment.text for segment in context.previous_last_row_segments]
+    first_data_row_texts = [segment.text for segment in context.current_first_data_row_segments]
 
-    # 按展开后的视觉列无法对齐时，跳过 VLM 调用
+    # 按渲染单元格段无法对齐时，跳过 VLM 调用
     if len(last_row_texts) != len(first_data_row_texts):
         logger.debug(
-            "Skipping cell merge prompt: expanded boundary column count mismatch ({} vs {})",
+            "Skipping cell merge prompt: rendered boundary segment count mismatch ({} vs {})",
             len(last_row_texts), len(first_data_row_texts),
         )
         return None
@@ -271,24 +207,23 @@ def build_cell_merge_prompt(
     last_row_repr = repr(last_row_texts)
     first_data_row_repr = repr(first_data_row_texts)
 
-    prompt = (
-        "Please merge the next two tables.\n"
-        "\n"
-        "## Table 1 (Previous Page - Last Table)\n"
-        "\n"
-        "**Caption:** (No caption)\n"
-        f"**Last Row(s) Data:**\n"
-        f"[{last_row_repr}]\n"
-        "\n"
-        "---\n"
-        "\n"
-        "## Table 2 (Current Page - First Table)\n"
-        "\n"
-        "**Caption:** (No caption)\n"
-        f"**First Data Row(s):**\n"
-        f"[{first_data_row_repr}]\n"
-    )
+    prompt = rf"""Please merge the next two tables.
 
+## Table 1 (Previous Page - Last Table)
+
+**Caption:** (No caption)
+**Last Row(s) Data:**
+[{last_row_repr}]
+
+---
+
+## Table 2 (Current Page - First Table)
+
+**Caption:** (No caption)
+**First Data Row(s):**
+[{first_data_row_repr}]"""
+
+    logger.debug(f"\nPrompt cell merge prompt: {prompt}")
     return prompt
 
 
@@ -358,7 +293,11 @@ def _prepare_merge_tasks(
                 prev_block_idx=prev_block_idx,
                 curr_page_idx=curr_page_idx,
                 curr_block_idx=curr_block_idx,
+                expected_segment_count=context.segment_count,
                 expected_expanded_col_count=context.expanded_col_count,
+                previous_segment_col_ranges=[
+                    (segment.start_col, segment.end_col) for segment in context.previous_last_row_segments
+                ],
             )
         )
     return tasks
@@ -381,20 +320,26 @@ def _apply_merge_results(
         if cell_merge is None:
             continue
 
-        if len(cell_merge) != task.expected_expanded_col_count:
+        if len(cell_merge) != task.expected_segment_count:
             logger.debug(
-                "Skipping cross-page table merge result: expanded boundary column count mismatch for "
+                "Skipping cross-page table merge result: rendered boundary segment count mismatch for "
                 "page {} block {} -> page {} block {} ({} vs {})",
                 task.prev_page_idx, task.prev_block_idx, task.curr_page_idx, task.curr_block_idx,
-                len(cell_merge), task.expected_expanded_col_count,
+                len(cell_merge), task.expected_segment_count,
             )
             continue
 
+        expanded_cell_merge = [0] * task.expected_expanded_col_count
+        for merge_flag, (start_col, end_col) in zip(cell_merge, task.previous_segment_col_ranges):
+            if merge_flag == 1:
+                for col_idx in range(start_col, min(end_col, task.expected_expanded_col_count)):
+                    expanded_cell_merge[col_idx] = 1
+
         logger.debug(
             "Cross-page table merge detected: page {} block {} -> page {} block {}, cell_merge={}",
-            task.prev_page_idx, task.prev_block_idx, task.curr_page_idx, task.curr_block_idx, cell_merge,
+            task.prev_page_idx, task.prev_block_idx, task.curr_page_idx, task.curr_block_idx, expanded_cell_merge,
         )
-        results[task.curr_page_idx][task.curr_block_idx]["cell_merge"] = cell_merge
+        results[task.curr_page_idx][task.curr_block_idx]["cell_merge"] = expanded_cell_merge
 
 
 def detect_cross_page_cell_merge(
