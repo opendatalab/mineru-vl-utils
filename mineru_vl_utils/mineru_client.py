@@ -56,12 +56,12 @@ class MinerUSamplingParams(SamplingParams):
 
 
 DEFAULT_PROMPTS: dict[str, str] = {
-    "table": "\nTable Recognition:",
-    "equation": "\nFormula Recognition:",
-    "image": "\nImage Analysis:",
-    "chart": "\nImage Analysis:",
-    "[default]": "\nText Recognition:",
-    "[layout]": "\nLayout Detection:",
+    "table": r"\nTable Recognition:",
+    "equation": r"\nFormula Recognition:",
+    "image": r"\nImage Analysis:",
+    "chart": r"\nImage Analysis:",
+    "[default]": r"\nText Recognition:",
+    "[layout]": r"\nLayout Detection:",
     "[cross_page_table_merge]": "",  # prompt is dynamic, built from table content
 }
 
