@@ -236,6 +236,7 @@ class MinerUClientHelper:
         return image
 
     def parse_layout_output(self, output: str) -> list[ContentBlock]:
+        logger.debug("Layout raw output: \n{}", output)
         blocks: list[ContentBlock] = []
         matched = False
         for match in re.finditer(_layout_re, output, re.DOTALL):

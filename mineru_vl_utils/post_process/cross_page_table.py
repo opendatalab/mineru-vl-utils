@@ -221,9 +221,9 @@ def build_cell_merge_prompt(
 
 **Caption:** (No caption)
 **First Data Row(s):**
-[{first_data_row_repr}]
-"""
+[{first_data_row_repr}]"""
 
+    logger.debug(f"\nPrompt cell merge prompt: {prompt}")
     return prompt
 
 
