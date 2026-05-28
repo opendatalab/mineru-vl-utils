@@ -279,6 +279,9 @@ def process_image_or_chart(content: str) -> dict[str, str]:
         if content.count("<|content_start|>") == 1 and content.count("<|content_end|>") == 0:
             normalized_content = content.split("<|content_start|>")[-1]
 
+    # 这里用于选择性处理模型可能不准确的结构化 content。
+    # 如果清空 normalized_content，外层 simple_process 回退使用 caption 是预期行为。
+
     # 1) chemical 类别：content 置空
     if class_name == "chemical":
         normalized_content = ""

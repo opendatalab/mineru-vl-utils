@@ -6,8 +6,10 @@
 - 通过 object.__new__() 绕过 __init__ 中的 vllm import
 """
 
+import asyncio
 import math
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -19,6 +21,7 @@ from mineru_vl_utils.vlm_client.base_client import (
     compute_confidence_metrics,
 )
 from mineru_vl_utils.vlm_client.vllm_engine_client import VllmEngineVlmClient
+from mineru_vl_utils.vlm_client.vllm_async_engine_client import VllmAsyncEngineVlmClient
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +59,43 @@ class MockVllmSamplingParams:
             setattr(self, k, v)
 
 
+class MockRenderer:
+    """记录 render_cmpl 调用，并返回模拟新版 vLLM EngineInput。"""
+
+    def __init__(self):
+        self.calls = []
+
+    def render_cmpl(self, prompts):
+        self.calls.append(prompts)
+        return [{"type": "tokens", "prompt_token_ids": [idx + 1]} for idx, _ in enumerate(prompts)]
+
+
+class MockAsyncRenderer(MockRenderer):
+    """记录 render_cmpl_async 调用，并返回模拟新版 vLLM EngineInput。"""
+
+    async def render_cmpl_async(self, prompts):
+        self.calls.append(prompts)
+        return [{"type": "tokens", "prompt_token_ids": [idx + 10]} for idx, _ in enumerate(prompts)]
+
+
+class MockAsyncVllm:
+    """模拟 vLLM AsyncLLM.generate 的异步迭代接口。"""
+
+    def __init__(self, outputs: list[MockRequestOutput], renderer=None):
+        self.outputs = outputs
+        self.renderer = renderer
+        self.generate_calls = []
+
+    def generate(self, **kwargs):
+        self.generate_calls.append(kwargs)
+
+        async def _gen():
+            for output in self.outputs:
+                yield output
+
+        return _gen()
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -84,6 +124,26 @@ def client(tokenizer):
     c.use_tqdm = False
     c.debug = False
     c.vllm_llm = MagicMock()
+    c.vllm_llm.renderer = None
+    return c
+
+
+@pytest.fixture
+def async_client(tokenizer):
+    """构造 VllmAsyncEngineVlmClient 实例，绕过 __init__，使用真实 tokenizer。"""
+    c = object.__new__(VllmAsyncEngineVlmClient)
+    c.prompt = "What is the text in the illustrate?"
+    c.system_prompt = "You are a helpful assistant."
+    c.sampling_params = None
+    c.text_before_image = False
+    c.allow_truncated_content = False
+    c.tokenizer = tokenizer
+    c.model_max_length = 4096
+    c.VllmSamplingParams = MockVllmSamplingParams
+    c.VllmRequestOutputKind = SimpleNamespace(FINAL_ONLY="final_only")
+    c.max_concurrency = 100
+    c.debug = False
+    c.vllm_async_llm = MockAsyncVllm([])
     return c
 
 
@@ -127,6 +187,38 @@ class TestComputeConfidenceMetrics:
 
 
 class TestPredictScored:
+    def test_renderer_outputs_are_passed_to_generate(self, client):
+        """验证新版 vLLM renderer 输出会直接传给 generate。"""
+        renderer = MockRenderer()
+        client.vllm_llm.renderer = renderer
+        mock_output = MockRequestOutput(
+            outputs=[MockCompletionOutput(text="ok", token_ids=[], logprobs=[])]
+        )
+        client.vllm_llm.generate.return_value = [mock_output]
+
+        result = client.batch_predict(images=[None], prompts=["Describe this."])
+
+        assert result == ["ok"]
+        call_kwargs = client.vllm_llm.generate.call_args.kwargs
+        assert call_kwargs["prompts"] == [{"type": "tokens", "prompt_token_ids": [1]}]
+        assert renderer.calls[0][0]["prompt"]
+        assert "type" not in renderer.calls[0][0]
+
+    def test_raw_prompt_is_used_when_renderer_is_unavailable(self, client):
+        """验证旧版 vLLM 没有 renderer 时继续使用 raw prompt。"""
+        client.vllm_llm.renderer = None
+        mock_output = MockRequestOutput(
+            outputs=[MockCompletionOutput(text="ok", token_ids=[], logprobs=[])]
+        )
+        client.vllm_llm.generate.return_value = [mock_output]
+
+        result = client.batch_predict(images=[None], prompts=["Describe this."])
+
+        assert result == ["ok"]
+        call_kwargs = client.vllm_llm.generate.call_args.kwargs
+        assert "prompt" in call_kwargs["prompts"][0]
+        assert "type" not in call_kwargs["prompts"][0]
+
     def test_basic(self, client):
         """验证 predict_scored 正确提取 logprobs 并计算指标。"""
         # 用 tokenizer 编码一段文本，模拟模型输出
@@ -178,6 +270,27 @@ class TestPredictScored:
         sp_list = call_kwargs.kwargs.get("sampling_params") or call_kwargs[1].get("sampling_params")
         for sp in sp_list:
             assert hasattr(sp, "logprobs") and sp.logprobs == 0
+
+    def test_predict_scored_uses_renderer_outputs(self, client):
+        """验证 predict_scored 也走 renderer 输出而不是 raw prompt。"""
+        renderer = MockRenderer()
+        client.vllm_llm.renderer = renderer
+        mock_output = MockRequestOutput(
+            outputs=[
+                MockCompletionOutput(
+                    text="x",
+                    token_ids=[100],
+                    logprobs=[{100: MockLogprob(-0.5)}],
+                )
+            ]
+        )
+        client.vllm_llm.generate.return_value = [mock_output]
+
+        client.predict_scored(image=None, prompt="test")
+
+        call_kwargs = client.vllm_llm.generate.call_args.kwargs
+        assert call_kwargs["prompts"] == [{"type": "tokens", "prompt_token_ids": [1]}]
+        assert "prompt" in renderer.calls[0][0]
 
     def test_batch(self, client):
         """batch_predict_scored 多个样本。"""
@@ -304,6 +417,39 @@ class TestScore:
             assert sp.prompt_logprobs == 0
             assert sp.max_tokens == 1
 
+    def test_score_uses_renderer_outputs(self, client):
+        """验证 score 的 prompt_logprobs 路径也走 renderer 输出。"""
+        renderer = MockRenderer()
+        client.vllm_llm.renderer = renderer
+        scored_text = "answer"
+        messages = client.build_messages("q", 0)
+        messages_with = messages + [{"role": "assistant", "content": scored_text}]
+        full_prompt = client.tokenizer.apply_chat_template(
+            messages_with, tokenize=False, add_generation_prompt=False
+        )
+        full_ids = client.tokenizer.encode(full_prompt)
+        prompt_logprobs: list[dict[int, MockLogprob] | None] = [None]
+        for i in range(1, len(full_ids)):
+            prompt_logprobs.append({full_ids[i]: MockLogprob(-0.3)})
+        mock_output = MockRequestOutput(
+            outputs=[
+                MockCompletionOutput(
+                    text="",
+                    token_ids=[full_ids[-1]],
+                    logprobs=[{full_ids[-1]: MockLogprob(-0.1)}],
+                )
+            ],
+            prompt_token_ids=full_ids,
+            prompt_logprobs=prompt_logprobs,
+        )
+        client.vllm_llm.generate.return_value = [mock_output]
+
+        client.score(image=None, scored_text=scored_text, prompt="q")
+
+        call_kwargs = client.vllm_llm.generate.call_args.kwargs
+        assert call_kwargs["prompts"] == [{"type": "tokens", "prompt_token_ids": [1]}]
+        assert "prompt" in renderer.calls[0][0]
+
     def test_correct_label_lower_ppl_than_random(self, client, tokenizer):
         """模拟：正确标注的 PPL 应低于随机文本的 PPL。"""
         correct_text = "The quick brown fox"
@@ -343,3 +489,72 @@ class TestScore:
         assert result_correct.perplexity < result_random.perplexity
         assert result_correct.logprob_std >= 0
         assert result_random.logprob_std >= 0
+
+
+class TestAsyncRendererCompatibility:
+    def test_aio_predict_uses_async_renderer_output(self, async_client):
+        """验证 aio_predict 使用 render_cmpl_async 的 EngineInput。"""
+        renderer = MockAsyncRenderer()
+        output = MockRequestOutput(
+            outputs=[MockCompletionOutput(text="ok", token_ids=[], logprobs=[])]
+        )
+        async_client.vllm_async_llm = MockAsyncVllm([output], renderer=renderer)
+
+        result = asyncio.run(async_client.aio_predict(image=None, prompt="Describe this."))
+
+        assert result == "ok"
+        call_kwargs = async_client.vllm_async_llm.generate_calls[0]
+        assert call_kwargs["prompt"] == {"type": "tokens", "prompt_token_ids": [10]}
+        assert "prompt" in renderer.calls[0][0]
+
+    def test_aio_predict_scored_uses_async_renderer_output(self, async_client):
+        """验证 aio_predict_scored 使用 render_cmpl_async 的 EngineInput。"""
+        renderer = MockAsyncRenderer()
+        output = MockRequestOutput(
+            outputs=[
+                MockCompletionOutput(
+                    text="x",
+                    token_ids=[100],
+                    logprobs=[{100: MockLogprob(-0.5)}],
+                )
+            ]
+        )
+        async_client.vllm_async_llm = MockAsyncVllm([output], renderer=renderer)
+
+        result = asyncio.run(async_client.aio_predict_scored(image=None, prompt="test"))
+
+        assert result.text == "x"
+        call_kwargs = async_client.vllm_async_llm.generate_calls[0]
+        assert call_kwargs["prompt"] == {"type": "tokens", "prompt_token_ids": [10]}
+
+    def test_aio_score_uses_async_renderer_output(self, async_client):
+        """验证 aio_score 的 prompt_logprobs 路径使用 render_cmpl_async。"""
+        renderer = MockAsyncRenderer()
+        scored_text = "answer"
+        messages = async_client.build_messages("q", 0)
+        messages_with = messages + [{"role": "assistant", "content": scored_text}]
+        full_prompt = async_client.tokenizer.apply_chat_template(
+            messages_with, tokenize=False, add_generation_prompt=False
+        )
+        full_ids = async_client.tokenizer.encode(full_prompt)
+        prompt_logprobs: list[dict[int, MockLogprob] | None] = [None]
+        for i in range(1, len(full_ids)):
+            prompt_logprobs.append({full_ids[i]: MockLogprob(-0.3)})
+        output = MockRequestOutput(
+            outputs=[
+                MockCompletionOutput(
+                    text="",
+                    token_ids=[full_ids[-1]],
+                    logprobs=[{full_ids[-1]: MockLogprob(-0.1)}],
+                )
+            ],
+            prompt_token_ids=full_ids,
+            prompt_logprobs=prompt_logprobs,
+        )
+        async_client.vllm_async_llm = MockAsyncVllm([output], renderer=renderer)
+
+        result = asyncio.run(async_client.aio_score(image=None, scored_text=scored_text, prompt="q"))
+
+        assert result.text == scored_text
+        call_kwargs = async_client.vllm_async_llm.generate_calls[0]
+        assert call_kwargs["prompt"] == {"type": "tokens", "prompt_token_ids": [10]}

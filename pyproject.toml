@@ -40,7 +40,7 @@ transformers = [
     "torchvision",
 ]
 vllm = [
-    "vllm>=0.10.1.1,<0.12",
+    "vllm>=0.10.1.1,<0.22.0",
 ]
 mlx = [
     "mlx-vlm>=0.3.3,<0.4.0",
