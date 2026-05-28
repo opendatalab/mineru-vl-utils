@@ -1,5 +1,5 @@
 import asyncio
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 from loguru import logger
 
@@ -55,6 +55,14 @@ def _patch_vllm_logprobs_overflow():
 
 
 _patch_vllm_logprobs_overflow()
+
+
+def _build_raw_vllm_prompt(chat_prompt: str, image_list: list[Image.Image]) -> dict[str, Any]:
+    """构造兼容旧版 vLLM 的 raw prompt，供 renderer 不可用时回退。"""
+    vllm_prompt: dict[str, Any] = {"prompt": chat_prompt}
+    if image_list:
+        vllm_prompt["multi_modal_data"] = {"image": image_list}
+    return vllm_prompt
 
 
 class VllmEngineVlmClient(VlmClient):
@@ -168,6 +176,14 @@ class VllmEngineVlmClient(VlmClient):
 
         return choices[0].text
 
+    def _render_vllm_cmpl_inputs(self, raw_prompts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """优先使用新版 vLLM Renderer 预处理 prompt，旧版无 renderer 时保持原输入。"""
+        renderer = getattr(self.vllm_llm, "renderer", None)
+        render_cmpl = getattr(renderer, "render_cmpl", None) if renderer is not None else None
+        if callable(render_cmpl):
+            return render_cmpl(raw_prompts)
+        return raw_prompts
+
     def predict(
         self,
         image: ImageType,
@@ -228,10 +244,11 @@ class VllmEngineVlmClient(VlmClient):
         chat_prompts: list[str],
         vllm_sampling_params: list["VllmSamplingParams"],
     ):
-        vllm_prompts = [
-            {"prompt": chat_prompt, **({"multi_modal_data": {"image": image}} if image else {})}
+        raw_prompts = [
+            _build_raw_vllm_prompt(chat_prompt, image)
             for chat_prompt, image in zip(chat_prompts, image_lists)
         ]
+        vllm_prompts = self._render_vllm_cmpl_inputs(raw_prompts)
 
         outputs = self.vllm_llm.generate(
             prompts=vllm_prompts,  # type: ignore
@@ -317,10 +334,11 @@ class VllmEngineVlmClient(VlmClient):
             batch_chat_prompts = chat_prompts[i : i + batch_size]
             batch_sp_list = vllm_sp_list[i : i + batch_size]
 
-            vllm_prompts = [
-                {"prompt": chat_prompt, **({"multi_modal_data": {"image": image}} if image else {})}
+            raw_prompts = [
+                _build_raw_vllm_prompt(chat_prompt, image)
                 for chat_prompt, image in zip(batch_chat_prompts, batch_image_lists)
             ]
+            vllm_prompts = self._render_vllm_cmpl_inputs(raw_prompts)
 
             outputs = self.vllm_llm.generate(
                 prompts=vllm_prompts,  # type: ignore
@@ -476,10 +494,11 @@ class VllmEngineVlmClient(VlmClient):
             batch_scored_texts = scored_texts[i : i + batch_size]
             batch_scored_token_counts = scored_token_counts[i : i + batch_size]
 
-            vllm_prompts = [
-                {"prompt": chat_prompt, **({"multi_modal_data": {"image": image}} if image else {})}
+            raw_prompts = [
+                _build_raw_vllm_prompt(chat_prompt, image)
                 for chat_prompt, image in zip(batch_chat_prompts, batch_image_lists)
             ]
+            vllm_prompts = self._render_vllm_cmpl_inputs(raw_prompts)
 
             outputs = self.vllm_llm.generate(
                 prompts=vllm_prompts,  # type: ignore

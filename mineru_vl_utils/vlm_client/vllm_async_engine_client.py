@@ -1,6 +1,6 @@
 import asyncio
 import uuid
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 from loguru import logger
 
@@ -20,7 +20,7 @@ from .base_client import (
     compute_confidence_metrics,
 )
 from .utils import aio_image_to_obj_list, gather_tasks
-from .vllm_engine_client import _patch_vllm_logprobs_overflow
+from .vllm_engine_client import _build_raw_vllm_prompt, _patch_vllm_logprobs_overflow
 
 _patch_vllm_logprobs_overflow()
 
@@ -145,6 +145,23 @@ class VllmAsyncEngineVlmClient(VlmClient):
 
         return choices[0].text
 
+    async def _render_vllm_cmpl_input(self, raw_prompt: dict[str, Any]) -> dict[str, Any]:
+        """优先使用新版 vLLM Renderer 异步预处理 prompt，旧版无 renderer 时保持原输入。"""
+        renderer = getattr(self.vllm_async_llm, "renderer", None)
+        if renderer is None:
+            return raw_prompt
+
+        render_cmpl_async = getattr(renderer, "render_cmpl_async", None)
+        if callable(render_cmpl_async):
+            rendered_inputs = await render_cmpl_async([raw_prompt])
+            return rendered_inputs[0]
+
+        render_cmpl = getattr(renderer, "render_cmpl", None)
+        if callable(render_cmpl):
+            return render_cmpl([raw_prompt])[0]
+
+        return raw_prompt
+
     def predict(
         self,
         image: ImageType,
@@ -192,12 +209,11 @@ class VllmAsyncEngineVlmClient(VlmClient):
         if priority is not None:
             generate_kwargs["priority"] = priority
 
+        vllm_prompt = await self._render_vllm_cmpl_input(_build_raw_vllm_prompt(chat_prompt, image))
+
         last_output = None
         async for output in self.vllm_async_llm.generate(
-            prompt={
-                "prompt": chat_prompt,
-                **({"multi_modal_data": {"image": image}} if image else {}),
-            },
+            prompt=vllm_prompt,
             sampling_params=vllm_sp,
             request_id=str(uuid.uuid4()),
             **generate_kwargs,
@@ -303,12 +319,11 @@ class VllmAsyncEngineVlmClient(VlmClient):
         if priority is not None:
             generate_kwargs["priority"] = priority
 
+        vllm_prompt = await self._render_vllm_cmpl_input(_build_raw_vllm_prompt(chat_prompt, image))
+
         last_output = None
         async for output in self.vllm_async_llm.generate(
-            prompt={
-                "prompt": chat_prompt,
-                **({"multi_modal_data": {"image": image}} if image else {}),
-            },
+            prompt=vllm_prompt,
             sampling_params=vllm_sp,
             request_id=str(uuid.uuid4()),
             **generate_kwargs,
@@ -440,12 +455,11 @@ class VllmAsyncEngineVlmClient(VlmClient):
         if priority is not None:
             generate_kwargs["priority"] = priority
 
+        vllm_prompt = await self._render_vllm_cmpl_input(_build_raw_vllm_prompt(full_prompt, image_list))
+
         last_output = None
         async for output in self.vllm_async_llm.generate(
-            prompt={
-                "prompt": full_prompt,
-                **({"multi_modal_data": {"image": image_list}} if image_list else {}),
-            },
+            prompt=vllm_prompt,
             sampling_params=vllm_sp,
             request_id=str(uuid.uuid4()),
             **generate_kwargs,
