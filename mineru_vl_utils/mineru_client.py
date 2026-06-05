@@ -1221,3 +1221,202 @@ class MinerUClient:
                 scored,
                 image_analysis,
             )
+    @staticmethod
+    def _coerce_external_layout_blocks(blocks: Sequence[ContentBlock | dict]) -> list[ContentBlock]:
+        """将外部layout block规范化为ContentBlock，并保留调用方附加的映射字段。"""
+        normalized_blocks: list[ContentBlock] = []
+        for block in blocks:
+            if isinstance(block, ContentBlock):
+                normalized_blocks.append(block)
+                continue
+
+            block_type = block["type"]
+            merge_prev = block.get("merge_prev", False) if block_type == "text" else False
+            normalized_block = ContentBlock(
+                block_type,
+                list(block["bbox"]),
+                angle=block.get("angle"),
+                content=block.get("content"),
+                merge_prev=merge_prev,
+            )
+            for key, value in block.items():
+                if key not in {"type", "bbox", "angle", "content", "merge_prev"}:
+                    normalized_block[key] = value
+            normalized_blocks.append(normalized_block)
+        return normalized_blocks
+
+    @staticmethod
+    def _expand_block_priorities(
+        priority: Sequence[int | None] | int | None,
+        all_indices: Sequence[tuple[int, int]],
+    ) -> list[int | None] | int | None:
+        """按展开后的block输入顺序复制页面级priority，避免外部layout批处理错位。"""
+        if priority is None or not isinstance(priority, Sequence):
+            return priority
+        return [priority[img_idx] for img_idx, _ in all_indices]
+
+    def extract_with_layout(
+        self,
+        image: Image.Image,
+        blocks: Sequence[ContentBlock | dict],
+        priority: int | None = None,
+        not_extract_list: list[str] | None = None,
+        scored: bool | None = None,
+        image_analysis: bool | None = None,
+    ) -> ExtractResult:
+        """基于调用方提供的layout blocks做内容抽取，不再触发VLM layout检测。"""
+        return self.batch_extract_with_layout(
+            [image],
+            [blocks],
+            priority=priority,
+            not_extract_list=not_extract_list,
+            scored=scored,
+            image_analysis=image_analysis,
+        )[0]
+
+    def batch_extract_with_layout(
+        self,
+        images: list[Image.Image],
+        blocks_list: Sequence[Sequence[ContentBlock | dict]],
+        priority: Sequence[int | None] | int | None = None,
+        not_extract_list: list[str] | None = None,
+        scored: bool | None = None,
+        image_analysis: bool | None = None,
+    ) -> list[ExtractResult]:
+        """批量基于外部layout blocks做VLM内容抽取，并复用现有后处理链路。"""
+        if len(images) != len(blocks_list):
+            raise Exception("Length of images must match length of blocks_list")
+        if priority is None and getattr(self, "incremental_priority", False):
+            priority = list(range(len(images)))
+
+        normalized_blocks_list = [
+            self._coerce_external_layout_blocks(blocks)
+            for blocks in blocks_list
+        ]
+        prepared_inputs = self.helper.batch_prepare_for_extract(
+            getattr(self, "executor", None),
+            images,
+            normalized_blocks_list,
+            not_extract_list,
+            image_analysis,
+        )
+        all_images, all_prompts, all_params, all_indices = self._flatten_prepared_inputs(prepared_inputs)
+        if all_images:
+            expanded_priority = self._expand_block_priorities(priority, all_indices)
+            outputs = self._batch_predict(all_images, all_prompts, all_params, expanded_priority, scored)
+            for (img_idx, idx), output in zip(all_indices, outputs):
+                normalized_blocks_list[img_idx][idx].content = output.text
+                normalized_blocks_list[img_idx][idx].scored = output.scored
+
+        processed_list = self.helper.batch_post_process(getattr(self, "executor", None), normalized_blocks_list)
+        results = [ExtractResult(blocks) for blocks in processed_list]
+
+        if self.helper.enable_cross_page_table_merge:
+            from .post_process.cross_page_table import detect_cross_page_cell_merge
+
+            params = self.sampling_params.get("[cross_page_table_merge]")
+
+            def batch_predict_fn(prompts: list[str]) -> list[str]:
+                return self.client.batch_predict(
+                    [None] * len(prompts), prompts, [params] * len(prompts),
+                )
+
+            detect_cross_page_cell_merge(results, batch_predict_fn)
+
+        return results
+
+    async def aio_extract_with_layout(
+        self,
+        image: Image.Image,
+        blocks: Sequence[ContentBlock | dict],
+        priority: int | None = None,
+        semaphore: asyncio.Semaphore | None = None,
+        not_extract_list: list[str] | None = None,
+        scored: bool | None = None,
+        image_analysis: bool | None = None,
+    ) -> ExtractResult:
+        """异步基于调用方提供的layout blocks做内容抽取。"""
+        return (
+            await self.aio_batch_extract_with_layout(
+                [image],
+                [blocks],
+                priority=priority,
+                semaphore=semaphore,
+                not_extract_list=not_extract_list,
+                scored=scored,
+                image_analysis=image_analysis,
+            )
+        )[0]
+
+    async def aio_batch_extract_with_layout(
+        self,
+        images: list[Image.Image],
+        blocks_list: Sequence[Sequence[ContentBlock | dict]],
+        priority: Sequence[int | None] | int | None = None,
+        semaphore: asyncio.Semaphore | None = None,
+        not_extract_list: list[str] | None = None,
+        scored: bool | None = None,
+        image_analysis: bool | None = None,
+    ) -> list[ExtractResult]:
+        """异步批量基于外部layout blocks做VLM内容抽取，并复用现有后处理链路。"""
+        if len(images) != len(blocks_list):
+            raise Exception("Length of images must match length of blocks_list")
+        if priority is None and getattr(self, "incremental_priority", False):
+            priority = list(range(len(images)))
+
+        semaphore = semaphore or asyncio.Semaphore(getattr(self, "max_concurrency", 100))
+        normalized_blocks_list = [
+            self._coerce_external_layout_blocks(blocks)
+            for blocks in blocks_list
+        ]
+        prepared_inputs = await gather_tasks(
+            tasks=[
+                self.helper.aio_prepare_for_extract(
+                    getattr(self, "executor", None),
+                    image,
+                    blocks,
+                    not_extract_list,
+                    image_analysis,
+                )
+                for image, blocks in zip(images, normalized_blocks_list)
+            ],
+            use_tqdm=getattr(self, "use_tqdm", False),
+            tqdm_desc="External Layout Extract Preparation",
+        )
+        all_images, all_prompts, all_params, all_indices = self._flatten_prepared_inputs(prepared_inputs)
+        if all_images:
+            expanded_priority = self._expand_block_priorities(priority, all_indices)
+            outputs = await self._aio_batch_predict(
+                all_images,
+                all_prompts,
+                all_params,
+                expanded_priority,
+                semaphore,
+                scored,
+                use_tqdm=getattr(self, "use_tqdm", False),
+                tqdm_desc="External Layout Extraction",
+            )
+            for (img_idx, idx), output in zip(all_indices, outputs):
+                normalized_blocks_list[img_idx][idx].content = output.text
+                normalized_blocks_list[img_idx][idx].scored = output.scored
+
+        processed_list = await gather_tasks(
+            tasks=[self.helper.aio_post_process(getattr(self, "executor", None), blocks) for blocks in normalized_blocks_list],
+            use_tqdm=getattr(self, "use_tqdm", False),
+            tqdm_desc="External Layout Post Processing",
+        )
+        results = [ExtractResult(blocks) for blocks in processed_list]
+
+        if self.helper.enable_cross_page_table_merge:
+            from .post_process.cross_page_table import aio_detect_cross_page_cell_merge
+
+            params = self.sampling_params.get("[cross_page_table_merge]")
+
+            async def aio_batch_predict_fn(prompts: list[str]) -> list[str]:
+                return await self.client.aio_batch_predict(
+                    [None] * len(prompts), prompts, [params] * len(prompts),
+                )
+
+            await aio_detect_cross_page_cell_merge(results, aio_batch_predict_fn)
+
+        return results

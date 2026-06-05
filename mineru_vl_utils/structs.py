@@ -8,6 +8,7 @@ class BlockType:
     TITLE = "title"  # 段落标题
     TABLE = "table"  # 表格
     EQUATION = "equation"  # 公式(独立公式)
+    FORMULA_NUMBER = "formula_number"  # 公式编号
     CODE = "code"  # 代码
     ALGORITHM = "algorithm"  # 算法/伪代码
     ASIDE_TEXT = "aside_text"  # 侧栏文本(装订线等)
@@ -41,6 +42,7 @@ BLOCK_TYPES = {
     BlockType.TITLE,
     BlockType.TABLE,
     BlockType.EQUATION,
+    BlockType.FORMULA_NUMBER,
     BlockType.CODE,
     BlockType.ALGORITHM,
     BlockType.ASIDE_TEXT,
