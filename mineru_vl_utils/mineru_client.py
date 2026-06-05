@@ -1380,7 +1380,7 @@ class MinerUClient:
                 )
                 for image, blocks in zip(images, normalized_blocks_list)
             ],
-            use_tqdm=getattr(self, "use_tqdm", False),
+            use_tqdm=False,
             tqdm_desc="External Layout Extract Preparation",
         )
         all_images, all_prompts, all_params, all_indices = self._flatten_prepared_inputs(prepared_inputs)
@@ -1402,7 +1402,7 @@ class MinerUClient:
 
         processed_list = await gather_tasks(
             tasks=[self.helper.aio_post_process(getattr(self, "executor", None), blocks) for blocks in normalized_blocks_list],
-            use_tqdm=getattr(self, "use_tqdm", False),
+            use_tqdm=False,
             tqdm_desc="External Layout Post Processing",
         )
         results = [ExtractResult(blocks) for blocks in processed_list]
