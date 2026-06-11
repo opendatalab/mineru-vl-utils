@@ -13,6 +13,7 @@ class BlockType:
     ALGORITHM = "algorithm"  # 算法/伪代码
     ASIDE_TEXT = "aside_text"  # 侧栏文本(装订线等)
     REF_TEXT = "ref_text"  # 参考文献(一条)
+    INDEX = "index"  # 目录/索引文本块
     PHONETIC = "phonetic"  # 注音符号
     LIST_ITEM = "list_item"  # 列表项(无序/有序列表)
     # captions
@@ -47,6 +48,7 @@ BLOCK_TYPES = {
     BlockType.ALGORITHM,
     BlockType.ASIDE_TEXT,
     BlockType.REF_TEXT,
+    BlockType.INDEX,
     BlockType.PHONETIC,
     BlockType.LIST_ITEM,
     # captions
