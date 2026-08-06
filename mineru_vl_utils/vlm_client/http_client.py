@@ -328,9 +328,7 @@ class HttpVlmClient(VlmClient):
         message = choices[0].get("message")
         if not isinstance(message, dict):
             raise ServerError("Message not found in the response.")
-        if "content" not in message:
-            raise ServerError("Content not found in the message.")
-        content = message["content"]
+        content = message.get("content") or ""
         if not (content is None or isinstance(content, str)):
             raise ServerError(f"Unexpected content type: {type(content)}.")
         # Allow the end token to be configured via environment variable, falling back to the default.
