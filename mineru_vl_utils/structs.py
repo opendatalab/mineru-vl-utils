@@ -5,7 +5,9 @@ from .vlm_client.base_client import ScoredOutput
 
 class BlockType:
     TEXT = "text"  # 文本
-    TITLE = "title"  # 段落标题
+    TITLE = "title"  # 通用标题
+    DOC_TITLE = "doc_title"  # 文档标题
+    PARAGRAPH_TITLE = "paragraph_title"  # 段落标题
     TABLE = "table"  # 表格
     EQUATION = "equation"  # 公式(独立公式)
     FORMULA_NUMBER = "formula_number"  # 公式编号
@@ -20,8 +22,10 @@ class BlockType:
     TABLE_CAPTION = "table_caption"  # 表格标题
     IMAGE_CAPTION = "image_caption"  # 图像标题
     CODE_CAPTION = "code_caption"  # 代码标题
+    CAPTION = "caption"  # 未分类的视觉块标题(图片/图表/表格/代码等)
     TABLE_FOOTNOTE = "table_footnote"  # 表格脚注
     IMAGE_FOOTNOTE = "image_footnote"  # 图像脚注
+    FOOTNOTE = "footnote"  # 未分类的视觉块脚注(图片/图表/表格/代码等)
     # paratexts
     HEADER = "header"  # 页眉
     FOOTER = "footer"  # 页脚
@@ -29,7 +33,7 @@ class BlockType:
     PAGE_FOOTNOTE = "page_footnote"  # 脚注
     # images
     IMAGE = "image"  # 图像
-    CHART = "chart"
+    CHART = "chart"  # 图表
     # containers
     LIST = "list"  # 列表块(无序/有序列表)
     IMAGE_BLOCK = "image_block"  # 图像块(多图)
@@ -41,6 +45,8 @@ class BlockType:
 BLOCK_TYPES = {
     BlockType.TEXT,
     BlockType.TITLE,
+    BlockType.DOC_TITLE,
+    BlockType.PARAGRAPH_TITLE,
     BlockType.TABLE,
     BlockType.EQUATION,
     BlockType.FORMULA_NUMBER,
@@ -52,9 +58,11 @@ BLOCK_TYPES = {
     BlockType.PHONETIC,
     BlockType.LIST_ITEM,
     # captions
+    BlockType.CAPTION,
     BlockType.TABLE_CAPTION,
     BlockType.IMAGE_CAPTION,
     BlockType.CODE_CAPTION,
+    BlockType.FOOTNOTE,
     BlockType.TABLE_FOOTNOTE,
     BlockType.IMAGE_FOOTNOTE,
     # paratexts

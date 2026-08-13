@@ -1,24 +1,52 @@
 import json
 import re
 from dataclasses import dataclass
+from importlib import import_module
 from typing import Any, Callable, Sequence
 
 from loguru import logger
 
 from ..structs import ContentBlock, ExtractResult
 
-try:
-    from mineru.utils.table_merge import (
-        build_table_state_from_html,
-        build_row_rendered_cell_segments,
-        can_merge_by_structure,
-        calculate_row_rendered_segments,
-        detect_table_headers,
-    )
+_TABLE_MERGE_HELPER_MODULES = (
+    "mineru.backend.utils.table_merge",
+    "mineru.utils.table_merge",
+)
+_TABLE_MERGE_IMPORT_ERROR: Exception | None = None
 
-    _HAS_TABLE_MERGE = True
-except ImportError:
-    _HAS_TABLE_MERGE = False
+build_table_state_from_html: Callable[..., Any]
+build_row_rendered_cell_segments: Callable[..., Any]
+can_merge_by_structure: Callable[..., Any]
+calculate_row_rendered_segments: Callable[..., Any]
+detect_table_headers: Callable[..., Any]
+
+
+def _load_table_merge_helpers() -> bool:
+    """按新旧路径加载 MinerU 表格合并辅助函数，兼容不同 MinerU 版本。"""
+    global build_table_state_from_html
+    global build_row_rendered_cell_segments
+    global can_merge_by_structure
+    global calculate_row_rendered_segments
+    global detect_table_headers
+    global _TABLE_MERGE_IMPORT_ERROR
+
+    for module_name in _TABLE_MERGE_HELPER_MODULES:
+        try:
+            module = import_module(module_name)
+            build_table_state_from_html = module.build_table_state_from_html
+            build_row_rendered_cell_segments = module.build_row_rendered_cell_segments
+            can_merge_by_structure = module.can_merge_by_structure
+            calculate_row_rendered_segments = module.calculate_row_rendered_segments
+            detect_table_headers = module.detect_table_headers
+            _TABLE_MERGE_IMPORT_ERROR = None
+            return True
+        except (AttributeError, ImportError) as e:
+            _TABLE_MERGE_IMPORT_ERROR = e
+
+    return False
+
+
+_HAS_TABLE_MERGE = _load_table_merge_helpers()
 
 SKIP_BETWEEN_TABLE_TYPES = {
     "table_caption",
@@ -134,7 +162,12 @@ def can_tables_merge_by_structure(
 ) -> bool:
     """基于表格结构判断两个 ContentBlock 中的表格是否可合并。"""
     if not _HAS_TABLE_MERGE:
-        logger.warning("mineru package not available, cannot check table merge structure")
+        logger.warning(
+            "MinerU table merge helpers are unavailable; tried {}, last import error: {}. "
+            "Cannot check table merge structure.",
+            ", ".join(_TABLE_MERGE_HELPER_MODULES),
+            _TABLE_MERGE_IMPORT_ERROR,
+        )
         return False
 
     states = _build_table_states(block1.content, block2.content)
@@ -356,7 +389,12 @@ def detect_cross_page_cell_merge(
         batch_predict_fn: 同步批量预测函数，接受 prompt 列表，返回模型输出列表
     """
     if not _HAS_TABLE_MERGE:
-        logger.warning("mineru package not available, skipping cross-page table merge detection")
+        logger.warning(
+            "MinerU table merge helpers are unavailable; tried {}, last import error: {}. "
+            "Skipping cross-page table merge detection.",
+            ", ".join(_TABLE_MERGE_HELPER_MODULES),
+            _TABLE_MERGE_IMPORT_ERROR,
+        )
         return
 
     pairs = find_cross_page_table_pairs(results)
@@ -390,7 +428,12 @@ async def aio_detect_cross_page_cell_merge(
         aio_batch_predict_fn: 异步批量预测函数，接受 prompt 列表，返回模型输出列表
     """
     if not _HAS_TABLE_MERGE:
-        logger.warning("mineru package not available, skipping cross-page table merge detection")
+        logger.warning(
+            "MinerU table merge helpers are unavailable; tried {}, last import error: {}. "
+            "Skipping cross-page table merge detection.",
+            ", ".join(_TABLE_MERGE_HELPER_MODULES),
+            _TABLE_MERGE_IMPORT_ERROR,
+        )
         return
 
     pairs = find_cross_page_table_pairs(results)
