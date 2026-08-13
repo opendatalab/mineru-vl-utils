@@ -489,6 +489,7 @@ class MinerUClient:
             "lmdeploy-engine",
             "vllm-engine",
             "vllm-async-engine",
+            "llama-cpp-engine",
         ],
         model_name: str | None = None,
         server_url: str | None = None,
@@ -498,6 +499,7 @@ class MinerUClient:
         vllm_llm=None,  # vllm.LLM model
         vllm_async_llm=None,  # vllm.v1.engine.async_llm.AsyncLLM instance
         lmdeploy_engine=None,  # lmdeploy.serve.vl_async_engine.VLAsyncEngine instance
+        llama_cpp_engine=None,  # mineru_llama_cpp.Engine instance
         model_path: str | None = None,
         prompts: dict[str, str] = DEFAULT_PROMPTS,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
@@ -611,6 +613,17 @@ class MinerUClient:
 
                 vllm_async_llm = AsyncLLM.from_engine_args(AsyncEngineArgs(model_path))
 
+        elif backend == "llama-cpp-engine":
+            # Unlike the other engine backends, llama_cpp_engine is never
+            # auto-constructed from model_path here: mineru_llama_cpp.Engine
+            # needs both a model and an mmproj path (not a single
+            # model_path), and this backend is designed to take an
+            # already-constructed Engine whose lifecycle the caller owns
+            # (see LlamaCppEngineVlmClient) -- construct it yourself and
+            # pass it in.
+            if llama_cpp_engine is None:
+                raise ValueError("llama_cpp_engine must be provided for the llama-cpp-engine backend.")
+
         self.client = new_vlm_client(
             backend=backend,
             model_name=model_name,
@@ -621,6 +634,7 @@ class MinerUClient:
             lmdeploy_engine=lmdeploy_engine,
             vllm_llm=vllm_llm,
             vllm_async_llm=vllm_async_llm,
+            llama_cpp_engine=llama_cpp_engine,
             system_prompt=system_prompt,
             allow_truncated_content=True,  # Allow truncated content for MinerU
             max_concurrency=max_concurrency,
@@ -663,7 +677,7 @@ class MinerUClient:
         self.debug = debug
         self.scored = scored
 
-        if backend in ("http-client", "vllm-async-engine", "lmdeploy-engine"):
+        if backend in ("http-client", "vllm-async-engine", "lmdeploy-engine", "llama-cpp-engine"):
             self.batching_mode = "concurrent"
         else:  # backend in ("transformers", "vllm-engine")
             self.batching_mode = "stepping"

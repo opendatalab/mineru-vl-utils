@@ -7,7 +7,7 @@ and handling responses from the MinerU Vision-Language Model.
 
 ## About Backends
 
-We provides 6 different backends(deployment modes):
+We provides 7 different backends(deployment modes):
 
 1. **http-client**: A HTTP client for interacting with the OpenAI-compatible model server.
 2. **transformers**: A backend for using HuggingFace Transformers models. (slow but simple to install)
@@ -15,6 +15,7 @@ We provides 6 different backends(deployment modes):
 4. **lmdeploy-engine**: A backend for using the LmDeploy engine.
 5. **vllm-engine**: A backend for using the VLLM synchronous batching engine.
 6. **vllm-async-engine**: A backend for using the VLLM asynchronous engine. (requires async programming)
+7. **llama-cpp-engine**: A backend for using in-process llama.cpp VLM inference via `mineru-llama-cpp` — no HTTP server, no subprocess. Install with `pip install mineru-vl-utils[llama-cpp]`.
 
 ## About Output Format
 
@@ -72,6 +73,12 @@ For `lmdeploy-engine` backend, install the package with the `lmdeploy` extra:
 
 ```bash
 pip install -U "mineru-vl-utils[lmdeploy]"
+```
+
+For `llama-cpp-engine` backend, install the package with the `llama-cpp` extra:
+
+```bash
+pip install -U "mineru-vl-utils[llama-cpp]"
 ```
 
 > [!NOTE]
@@ -291,6 +298,23 @@ async def main():
 asyncio.run(main())
 
 async_llm.shutdown()
+```
+
+### `llama-cpp-engine` Example
+
+This backend uses the in-process `mineru_llama_cpp.Engine` — no HTTP server needed.
+The caller creates and manages the Engine lifecycle.
+
+```python
+from PIL import Image
+from mineru_llama_cpp import Engine
+from mineru_vl_utils import MinerUClient
+
+with Engine("/path/to/model.gguf", "/path/to/mmproj.gguf") as engine:
+    client = MinerUClient(backend="llama-cpp-engine", llama_cpp_engine=engine)
+    image = Image.open("/path/to/the/test/image.png")
+    extracted_blocks = client.two_step_extract(image)
+    print(extracted_blocks)
 ```
 
 ## Other APIs

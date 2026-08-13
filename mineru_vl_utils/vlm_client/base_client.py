@@ -267,6 +267,7 @@ def new_vlm_client(
         "lmdeploy-engine",
         "vllm-engine",
         "vllm-async-engine",
+        "llama-cpp-engine",
     ],
     model_name: str | None = None,
     server_url: str | None = None,
@@ -276,6 +277,7 @@ def new_vlm_client(
     lmdeploy_engine=None,  # lmdeploy.serve.vl_async_engine.VLAsyncEngine instance
     vllm_llm=None,  # vllm.LLM model
     vllm_async_llm=None,  # vllm.v1.engine.async_llm.AsyncLLM instance
+    llama_cpp_engine=None,  # mineru_llama_cpp.Engine instance
     prompt: str = DEFAULT_USER_PROMPT,
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     sampling_params: SamplingParams | None = None,
@@ -384,6 +386,20 @@ def new_vlm_client(
 
         return VllmAsyncEngineVlmClient(
             vllm_async_llm=vllm_async_llm,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            sampling_params=sampling_params,
+            text_before_image=text_before_image,
+            allow_truncated_content=allow_truncated_content,
+            max_concurrency=max_concurrency,
+            debug=debug,
+        )
+
+    elif backend == "llama-cpp-engine":
+        from .llama_cpp_engine_client import LlamaCppEngineVlmClient
+
+        return LlamaCppEngineVlmClient(
+            llama_cpp_engine=llama_cpp_engine,
             prompt=prompt,
             system_prompt=system_prompt,
             sampling_params=sampling_params,
