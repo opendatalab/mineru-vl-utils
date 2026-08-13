@@ -9,6 +9,7 @@ from loguru import logger
 from ..structs import ContentBlock, ExtractResult
 
 _TABLE_MERGE_HELPER_MODULES = (
+    "mineru.backend.postprocess.table_merge",
     "mineru.backend.utils.table_merge",
     "mineru.utils.table_merge",
 )
@@ -163,8 +164,7 @@ def can_tables_merge_by_structure(
     """基于表格结构判断两个 ContentBlock 中的表格是否可合并。"""
     if not _HAS_TABLE_MERGE:
         logger.warning(
-            "MinerU table merge helpers are unavailable; tried {}, last import error: {}. "
-            "Cannot check table merge structure.",
+            "MinerU table merge helpers are unavailable; tried {}, last import error: {}. Cannot check table merge structure.",
             ", ".join(_TABLE_MERGE_HELPER_MODULES),
             _TABLE_MERGE_IMPORT_ERROR,
         )
@@ -233,7 +233,8 @@ def build_cell_merge_prompt(
     if len(last_row_texts) != len(first_data_row_texts):
         logger.debug(
             "Skipping cell merge prompt: rendered boundary segment count mismatch ({} vs {})",
-            len(last_row_texts), len(first_data_row_texts),
+            len(last_row_texts),
+            len(first_data_row_texts),
         )
         return None
 
@@ -311,7 +312,8 @@ def _prepare_merge_tasks(
         if prev_rendered_segments != curr_rendered_segments:
             logger.debug(
                 "Skipping cell merge prompt: boundary rendered segment mismatch ({} vs {})",
-                prev_rendered_segments, curr_rendered_segments,
+                prev_rendered_segments,
+                curr_rendered_segments,
             )
             continue
 
@@ -345,7 +347,8 @@ def _apply_merge_results(
     if len(tasks) != len(responses):
         logger.warning(
             "Task/response count mismatch: {} tasks but {} responses, skipping merge results",
-            len(tasks), len(responses),
+            len(tasks),
+            len(responses),
         )
         return
     for task, response in zip(tasks, responses):
@@ -357,8 +360,12 @@ def _apply_merge_results(
             logger.debug(
                 "Skipping cross-page table merge result: rendered boundary segment count mismatch for "
                 "page {} block {} -> page {} block {} ({} vs {})",
-                task.prev_page_idx, task.prev_block_idx, task.curr_page_idx, task.curr_block_idx,
-                len(cell_merge), task.expected_segment_count,
+                task.prev_page_idx,
+                task.prev_block_idx,
+                task.curr_page_idx,
+                task.curr_block_idx,
+                len(cell_merge),
+                task.expected_segment_count,
             )
             continue
 
@@ -370,7 +377,11 @@ def _apply_merge_results(
 
         logger.debug(
             "Cross-page table merge detected: page {} block {} -> page {} block {}, cell_merge={}",
-            task.prev_page_idx, task.prev_block_idx, task.curr_page_idx, task.curr_block_idx, expanded_cell_merge,
+            task.prev_page_idx,
+            task.prev_block_idx,
+            task.curr_page_idx,
+            task.curr_block_idx,
+            expanded_cell_merge,
         )
         results[task.curr_page_idx][task.curr_block_idx]["cell_merge"] = expanded_cell_merge
 

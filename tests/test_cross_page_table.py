@@ -16,7 +16,7 @@ PREVIOUS_HTML = (
     "<table>"
     "<tr><td>合计</td><td>--</td><td>49,031.73</td><td>50,199.76</td><td>7,973.94</td>"
     "<td>30,191.52</td><td>--</td><td>--</td><td>3,207.97</td><td>--</td><td>--</td></tr>"
-    "<tr><td>分项目说明未达到计划进度、预计收益的情况和原因(含</td><td colspan=\"10\">不适用</td></tr>"
+    '<tr><td>分项目说明未达到计划进度、预计收益的情况和原因(含</td><td colspan="10">不适用</td></tr>'
     "</table>"
 )
 
@@ -58,10 +58,21 @@ def _fake_table_merge_module(name: str, marker: str) -> types.ModuleType:
     return module
 
 
-def _reload_cross_page_table(monkeypatch, backend_module=None, legacy_module=None):
+def _reload_cross_page_table(
+    monkeypatch,
+    postprocess_module=None,
+    backend_module=None,
+    legacy_module=None,
+):
     """按测试指定模块状态重载跨页表格后处理模块。"""
+    postprocess_path = "mineru.backend.postprocess.table_merge"
     backend_path = "mineru.backend.utils.table_merge"
     legacy_path = "mineru.utils.table_merge"
+
+    if postprocess_module is None:
+        monkeypatch.setitem(sys.modules, postprocess_path, None)
+    else:
+        monkeypatch.setitem(sys.modules, postprocess_path, postprocess_module)
 
     if backend_module is None:
         monkeypatch.setitem(sys.modules, backend_path, None)
@@ -78,30 +89,65 @@ def _reload_cross_page_table(monkeypatch, backend_module=None, legacy_module=Non
     return importlib.reload(cross_page_table)
 
 
-def test_table_merge_helpers_prefer_backend_module(monkeypatch):
-    """backend 新路径和 legacy 旧路径同时存在时，应优先使用 backend。"""
+def test_table_merge_helpers_prefer_postprocess_module(monkeypatch):
+    """三个路径同时存在时，应优先使用 postprocess 新路径。"""
+    postprocess_module = _fake_table_merge_module(
+        "mineru.backend.postprocess.table_merge",
+        "postprocess",
+    )
     backend_module = _fake_table_merge_module("mineru.backend.utils.table_merge", "backend")
     legacy_module = _fake_table_merge_module("mineru.utils.table_merge", "legacy")
 
-    cross_page_table = _reload_cross_page_table(monkeypatch, backend_module, legacy_module)
+    cross_page_table = _reload_cross_page_table(
+        monkeypatch,
+        postprocess_module,
+        backend_module,
+        legacy_module,
+    )
+
+    assert cross_page_table._HAS_TABLE_MERGE is True
+    assert cross_page_table.build_table_state_from_html("<table></table>") == "postprocess"
+
+
+def test_table_merge_helpers_fallback_to_backend_module(monkeypatch):
+    """postprocess 新路径不可用时，应回退到 backend 旧路径。"""
+    backend_module = _fake_table_merge_module("mineru.backend.utils.table_merge", "backend")
+    legacy_module = _fake_table_merge_module("mineru.utils.table_merge", "legacy")
+
+    cross_page_table = _reload_cross_page_table(
+        monkeypatch,
+        postprocess_module=None,
+        backend_module=backend_module,
+        legacy_module=legacy_module,
+    )
 
     assert cross_page_table._HAS_TABLE_MERGE is True
     assert cross_page_table.build_table_state_from_html("<table></table>") == "backend"
 
 
 def test_table_merge_helpers_fallback_to_legacy_module(monkeypatch):
-    """backend 新路径不可用时，应回退到 legacy 旧路径。"""
+    """postprocess/backend 路径都不可用时，应回退到 legacy 旧路径。"""
     legacy_module = _fake_table_merge_module("mineru.utils.table_merge", "legacy")
 
-    cross_page_table = _reload_cross_page_table(monkeypatch, backend_module=None, legacy_module=legacy_module)
+    cross_page_table = _reload_cross_page_table(
+        monkeypatch,
+        postprocess_module=None,
+        backend_module=None,
+        legacy_module=legacy_module,
+    )
 
     assert cross_page_table._HAS_TABLE_MERGE is True
     assert cross_page_table.build_table_state_from_html("<table></table>") == "legacy"
 
 
 def test_table_merge_unavailable_warning_describes_import_paths(monkeypatch):
-    """两个路径都不可用时，warning 应说明缺失的是表格合并辅助接口。"""
-    cross_page_table = _reload_cross_page_table(monkeypatch, backend_module=None, legacy_module=None)
+    """三个路径都不可用时，warning 应说明全部表格合并辅助接口路径。"""
+    cross_page_table = _reload_cross_page_table(
+        monkeypatch,
+        postprocess_module=None,
+        backend_module=None,
+        legacy_module=None,
+    )
     messages = []
     monkeypatch.setattr(cross_page_table.logger, "warning", lambda message, *args: messages.append(message.format(*args)))
 
@@ -110,6 +156,7 @@ def test_table_merge_unavailable_warning_describes_import_paths(monkeypatch):
     assert cross_page_table._HAS_TABLE_MERGE is False
     assert messages
     assert "MinerU table merge helpers are unavailable" in messages[0]
+    assert "mineru.backend.postprocess.table_merge" in messages[0]
     assert "mineru.backend.utils.table_merge" in messages[0]
     assert "mineru.utils.table_merge" in messages[0]
     assert "last import error" in messages[0]
