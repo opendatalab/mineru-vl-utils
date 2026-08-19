@@ -108,6 +108,31 @@ You still can serve the model without logits processor:
 vllm serve opendatalab/MinerU2.5-2509-1.2B --host 127.0.0.1 --port 8000
 ```
 
+### Alternatively, serve with SGLang
+
+MinerU2.5 is a `Qwen2VLForConditionalGeneration` model, which SGLang serves
+natively, so you can also serve it with SGLang and connect through the
+`http-client` backend:
+
+```bash
+python3 -m sglang.launch_server \
+  --model-path opendatalab/MinerU2.5-2509-1.2B \
+  --host 127.0.0.1 --port 30000
+```
+
+On newer SGLang releases the `sglang serve opendatalab/MinerU2.5-2509-1.2B
+--host 127.0.0.1 --port 30000` entrypoint alias also works. Neither
+`--trust-remote-code` nor `--chat-template` is required.
+
+> SGLang does not support the `no_repeat_ngram_size` sampling param, so unlike
+> the vllm path there is no `MinerULogitsProcessor` equivalent applied — the
+> `http-client` backend sends the param inside `vllm_xargs` and the SGLang
+> server silently ignores it. This is fine for clean documents (output matches
+> the vllm/transformers paths); repetition is only mitigated by the default
+> `presence_penalty`/`frequency_penalty`. For stricter control, launch SGLang
+> with `--enable-custom-logit-processor` and port the n-gram block through its
+> custom logit processor mechanism.
+
 ## Using `MinerUClient` by Code
 
 Now you can use the `MinerUClient` class to interact with the model.
