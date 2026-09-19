@@ -207,9 +207,14 @@ class LmdeployEngineVlmClient(VlmClient):
         gen_configs: list[Any],
         priority: int | None,
     ) -> list[str]:
-        """消费公开完整响应流，按完成请求更新进度，并在本批结束后传播响应错误。"""
-        outputs: list[str | None] = [None] * len(prompts)
-        seen: set[int] = set()
+        """按请求索引聚合多路复用响应流，按完成请求更新进度，并在本批结束后传播响应错误。
+
+        LMDeploy 0.17 对同一请求可能交出多帧 Response：中间帧 finish_reason 为 None，
+        仅终止帧携带 stop/length/error 等终止原因；官方 Pipeline.infer 即按 Response.extend()
+        语义聚合多帧结果，此处对多请求交错流做相同的按索引聚合。
+        """
+        aggregated: list[Any | None] = [None] * len(prompts)
+        completed: set[int] = set()
         error: ServerError | None = None
         generate_kwargs = {} if priority is None else {"priority": priority}
         with tqdm(total=len(prompts), desc=VLM_PREDICT_DESC) as pbar:
@@ -224,26 +229,32 @@ class LmdeployEngineVlmClient(VlmClient):
                 if type(index) is not int or not 0 <= index < len(prompts):
                     error = error or ServerError("LMDeploy returned an invalid response index.")
                     continue
-                if index in seen:
-                    error = error or ServerError("LMDeploy returned a duplicate response index.")
+                if index in completed:
+                    error = error or ServerError("LMDeploy returned data after request completion.")
                     continue
-                seen.add(index)
-                finish_reason = getattr(response, "finish_reason", None)
+                if not isinstance(getattr(response, "text", None), str):
+                    error = error or ServerError("LMDeploy returned an incomplete response.")
+                    continue
+                current = aggregated[index]
+                if current is None:
+                    aggregated[index] = response
+                    current = response
+                else:
+                    current.extend(response)
+                finish_reason = getattr(current, "finish_reason", None)
+                if finish_reason is None:
+                    continue  # 中间帧是正常状态，继续等待该请求的终止帧。
+                completed.add(index)
                 if finish_reason == "error":
                     error = error or ServerError("LMDeploy inference failed.")
                     continue
-                text = getattr(response, "text", None)
-                if finish_reason is None or not isinstance(text, str):
-                    error = error or ServerError("LMDeploy returned an incomplete response.")
-                    continue
-                outputs[index] = text
                 pbar.update(1)
             # 不提前中断响应迭代，确保错误响应之后的在途请求仍完成本批清理。
             if error is not None:
                 raise error
-            if any(output is None for output in outputs):
+            if len(completed) != len(prompts):
                 raise ServerError("LMDeploy returned an unexpected number of responses.")
-        return [output for output in outputs if output is not None]
+        return [response.text for response in aggregated if response is not None]
 
     async def aio_predict(
         self,

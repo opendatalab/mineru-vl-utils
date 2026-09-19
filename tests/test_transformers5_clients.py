@@ -404,12 +404,11 @@ def test_lmdeploy_stream_progress_updates_before_batch_finishes(pipeline_type: t
     ("bad_response", "message"),
     [
         (SimpleNamespace(index=1, text="", finish_reason="error"), "inference failed"),
-        (SimpleNamespace(index=2, text="duplicate", finish_reason="stop"), "duplicate response index"),
+        (SimpleNamespace(index=2, text="late", finish_reason="stop"), "data after request completion"),
         (SimpleNamespace(index=-1, text="x", finish_reason="stop"), "invalid response index"),
         (SimpleNamespace(index=3, text="x", finish_reason="stop"), "invalid response index"),
         (SimpleNamespace(index="1", text="x", finish_reason="stop"), "invalid response index"),
         (SimpleNamespace(index=True, text="x", finish_reason="stop"), "invalid response index"),
-        (SimpleNamespace(index=1, text="x", finish_reason=None), "incomplete response"),
         (SimpleNamespace(index=1, text=None, finish_reason="stop"), "incomplete response"),
         (None, "unexpected number of responses"),
     ],
@@ -420,7 +419,7 @@ def test_lmdeploy_stream_errors_drain_batch_before_raising(
     bad_response: Any,
     message: str,
 ) -> None:
-    """响应错误不能中断本批消费；缺失和重复响应也不得虚增完成计数。"""
+    """响应错误不能中断本批消费；缺失和终止后重复响应也不得虚增完成计数。"""
     from unittest.mock import MagicMock
 
     pipeline = pipeline_type()
@@ -469,3 +468,67 @@ def test_lmdeploy_stream_exception_closes_progress(pipeline_type: type, monkeypa
     assert cleaned == [True]
     bar.update.assert_called_once_with(1)
     assert bar.__exit__.call_args.args[0] is RuntimeError
+
+
+class _ScriptedResponse:
+    """镜像 LMDeploy 0.17 Response 的多帧合并语义，供多帧流测试使用。"""
+
+    def __init__(self, text: str, finish_reason: str | None, index: int = 0) -> None:
+        self.text = text
+        self.finish_reason = finish_reason
+        self.index = index
+
+    def extend(self, other: "_ScriptedResponse") -> "_ScriptedResponse":
+        """按官方语义合并：文本拼接，终止原因与索引以后帧为准。"""
+        self.text += other.text
+        self.finish_reason = other.finish_reason
+        self.index = other.index
+        return self
+
+
+def test_lmdeploy_stream_aggregates_interleaved_multi_frame_responses(
+    pipeline_type: type,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """中间帧 finish_reason=None 是 LMDeploy 0.17 正常状态，必须聚合而非判为异常。"""
+    from unittest.mock import MagicMock
+    from mineru_vl_utils.vlm_client import lmdeploy_engine_client
+
+    pipeline = pipeline_type()
+    client = LmdeployEngineVlmClient(pipeline)
+    bar = MagicMock()
+    bar.__enter__.return_value = bar
+    factory = MagicMock(return_value=bar)
+
+    def stream(prompts: list[Any], *, gen_config: list[Any], stream_response: bool, **kwargs: Any) -> Iterator[Any]:
+        """多请求交错的增量帧与终止帧，覆盖流式与单帧两种交付形态。"""
+        yield _ScriptedResponse("a1", None, index=0)
+        yield _ScriptedResponse("b1", None, index=1)
+        yield _ScriptedResponse("a2", None, index=0)
+        yield _ScriptedResponse("c1", None, index=2)
+        yield _ScriptedResponse("A!", "stop", index=0)
+        yield _ScriptedResponse("b2", None, index=1)
+        yield _ScriptedResponse("B!", "stop", index=1)
+        yield _ScriptedResponse("C!", "length", index=2)
+
+    monkeypatch.setattr(pipeline, "stream_infer", stream)
+    monkeypatch.setattr(lmdeploy_engine_client, "tqdm", factory)
+    assert client.batch_predict([None] * 3, ["p0", "p1", "p2"]) == ["a1a2A!", "b1b2B!", "c1C!"]
+    factory.assert_called_once_with(total=3, desc="VLM Predict")
+    assert [call.args for call in bar.update.call_args_list] == [(1,), (1,), (1,)]
+
+
+def test_lmdeploy_stream_delta_without_terminal_reports_missing_response(
+    pipeline_type: type,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """流结束仍未收到终止帧的请求按数量不足报错，而不是误报中间帧异常。"""
+    pipeline = pipeline_type()
+
+    def stream(prompts: list[Any], *, gen_config: list[Any], stream_response: bool, **kwargs: Any) -> Iterator[Any]:
+        """只交付增量帧，模拟终止帧丢失。"""
+        yield _ScriptedResponse("only-delta", None, index=0)
+
+    monkeypatch.setattr(pipeline, "stream_infer", stream)
+    with pytest.raises(ServerError, match="unexpected number of responses"):
+        LmdeployEngineVlmClient(pipeline).batch_predict([None], ["a"])
