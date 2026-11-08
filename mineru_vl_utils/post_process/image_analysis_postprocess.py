@@ -30,12 +30,8 @@ def _extract_tagged_field(text: str, start_tag: str, end_tag: str) -> str:
 
 
 def _count_markdown_table_columns(line: str) -> int:
-    stripped = line.strip()
-    if stripped.startswith("|"):
-        stripped = stripped[1:]
-    if stripped.endswith("|"):
-        stripped = stripped[:-1]
-    return len(stripped.split("|"))
+    # Validation must use the same escaped-delimiter semantics as table conversion.
+    return len(_split_markdown_table_row(line))
 
 
 def _is_markdown_table_separator_line(line: str) -> bool:
@@ -54,7 +50,8 @@ def _split_markdown_table_row(line: str) -> list[str]:
     stripped = line.strip()
     if stripped.startswith("|"):
         stripped = stripped[1:]
-    if stripped.endswith("|"):
+    # Do not remove a literal escaped pipe when the optional outer boundary is absent.
+    if stripped.endswith("|") and (len(stripped[:-1]) - len(stripped[:-1].rstrip("\\"))) % 2 == 0:
         stripped = stripped[:-1]
 
     cells: list[str] = []
