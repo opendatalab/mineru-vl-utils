@@ -10,6 +10,7 @@ from .batch_errors import BlockPredictionResult, capture_block_error, collect_bl
 from .base_client import (
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_USER_PROMPT,
+    EngineUnavailableError,
     ImageType,
     SamplingParams,
     ServerError,
@@ -18,6 +19,24 @@ from .base_client import (
     VlmClient,
 )
 from .utils import VLM_PREDICT_DESC, gather_tasks, get_rgb_image, load_resource, run_in_thread_until_complete
+
+# LMDeploy 把引擎主循环停止（ENGINE_STOP_ERROR/SESSION_NOT_EXIST/NO_QUEUE 等）
+# 统一映射成 ErrorCode.ENGINE_UNAVAILABLE，与单片生成失败共用 finish_reason="error"。
+LMDEPLOY_ENGINE_UNAVAILABLE = "engine_unavailable"
+
+
+def _inference_error(outputs: Sequence[Any], message: str) -> ServerError:
+    """按 error_code 区分引擎不可用与单片生成失败。
+
+    引擎停止后所有请求都会以 finish_reason="error" 返回；若一律抛 ServerError，
+    上层会把整体故障当作可局部降级的单块失败，最终只体现为质量下降。
+    """
+    for output in outputs:
+        if getattr(output, "error_code", None) == LMDEPLOY_ENGINE_UNAVAILABLE:
+            detail = getattr(output, "error_message", None) or message
+            return EngineUnavailableError(f"{message} ({detail})")
+    return ServerError(message)
+
 
 
 class LmdeployEngineVlmClient(VlmClient):
@@ -220,7 +239,7 @@ class LmdeployEngineVlmClient(VlmClient):
         if len(outputs) != len(lmdeploy_prompts):
             raise ServerError("LMDeploy returned an unexpected number of responses.")
         if any(getattr(output, "finish_reason", None) == "error" for output in outputs):
-            raise ServerError("LMDeploy inference failed.")
+            raise _inference_error(outputs, "LMDeploy inference failed.")
         return [output.text for output in outputs]
 
     def _predict_with_progress(
@@ -268,7 +287,7 @@ class LmdeployEngineVlmClient(VlmClient):
                     continue  # 中间帧是正常状态，继续等待该请求的终止帧。
                 completed.add(index)
                 if finish_reason == "error":
-                    error = error or ServerError("LMDeploy inference failed.")
+                    error = error or _inference_error((current,), "LMDeploy inference failed.")
                     continue
                 pbar.update(1)
             # 不提前中断响应迭代，确保错误响应之后的在途请求仍完成本批清理。

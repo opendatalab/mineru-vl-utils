@@ -24,6 +24,10 @@ class ServerError(RuntimeError):
     pass
 
 
+class EngineUnavailableError(ServerError):
+    """推理引擎已不可用，后续请求同样会失败，调用方不应按单块失败降级。"""
+
+
 class HttpResponseError(ServerError):
     """保留 HTTP 状态码，供批量容错区分局部错误和全局服务故障。"""
 
