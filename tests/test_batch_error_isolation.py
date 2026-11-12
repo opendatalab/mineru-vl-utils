@@ -9,10 +9,17 @@ import pytest
 from PIL import Image
 
 from mineru_vl_utils import MinerUClient
-from mineru_vl_utils.vlm_client.base_client import HttpResponseError, UnsupportedError, VlmClient, new_vlm_client
+from mineru_vl_utils.vlm_client.base_client import (
+    EngineUnavailableError,
+    HttpResponseError,
+    ServerError,
+    UnsupportedError,
+    VlmClient,
+    new_vlm_client,
+)
 from mineru_vl_utils.vlm_client.http_client import HttpVlmClient
 from mineru_vl_utils.vlm_client.llama_cpp_engine_client import LlamaCppEngineVlmClient
-from mineru_vl_utils.vlm_client.lmdeploy_engine_client import LmdeployEngineVlmClient
+from mineru_vl_utils.vlm_client.lmdeploy_engine_client import LmdeployEngineVlmClient, _inference_error
 from mineru_vl_utils.vlm_client.vllm_async_engine_client import VllmAsyncEngineVlmClient
 
 
@@ -90,6 +97,7 @@ def test_all_failed_raises_first_input_error_but_empty_success_counts(cls, valid
         KeyError("program error"),
         IndexError("program error"),
         RuntimeError("engine stopped"),
+        EngineUnavailableError("LMDeploy inference failed."),
     ],
 )
 def test_fatal_error_is_never_isolated(cls, error):
@@ -105,6 +113,26 @@ def test_fatal_error_is_never_isolated(cls, error):
     with pytest.raises(type(error)) as raised:
         asyncio.run(client.aio_batch_predict([None, None], ["good", "bad"]))
     assert raised.value is error
+
+
+@pytest.mark.parametrize(
+    ("error_code", "expected"),
+    [
+        ("engine_unavailable", EngineUnavailableError),
+        ("internal_error", ServerError),
+        (None, ServerError),
+    ],
+)
+def test_inference_error_keeps_engine_unavailable_distinct(error_code, expected):
+    """引擎不可用必须与单片生成失败区分；缺失 error_code 时保持原有行为。"""
+    output = SimpleNamespace(
+        text="",
+        finish_reason="error",
+        error_code=error_code,
+        error_message="The inference engine is unavailable.",
+    )
+    error = _inference_error([output], "LMDeploy inference failed.")
+    assert type(error) is expected
 
 
 @pytest.mark.parametrize("cls", ASYNC_CLIENTS)
