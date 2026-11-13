@@ -408,7 +408,7 @@ def extract_largest_legal_markdown_table(content: str) -> str:
 
 
 def restore_whole_table_pipe_escapes(content: str) -> str:
-    """Recover uniformly escaped table runs without globally unescaping cell text."""
+    """仅恢复结构完整且统一转义的表格，避免全局去转义破坏单元格内容。"""
     output: List[str] = []
     # Normal table delimiters end the run, so neighboring valid tables are not rewritten.
     for escaped, group in groupby(
