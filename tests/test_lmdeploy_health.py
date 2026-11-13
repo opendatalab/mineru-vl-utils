@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from types import SimpleNamespace
 from typing import Any, Iterator
 from unittest.mock import MagicMock
@@ -102,15 +103,92 @@ def test_timeout_reuses_one_probe_and_later_recovers(pipeline: SimpleNamespace) 
     probe.close()
 
 
-def test_close_cancels_probe_and_waits_for_actual_cleanup(pipeline: SimpleNamespace) -> None:
-    """关闭等待探测的 finally，而不是仅看到并发 Future 已标记取消。"""
+def test_close_waits_for_actual_cleanup(pipeline: SimpleNamespace) -> None:
+    """关闭不能用取消冒充排空；异步探测也必须实际完成后才能返回。"""
     backend = pipeline.async_engine.engine
     backend.block = True
     probe = LmdeployHealthProbe(pipeline)
     assert probe.check(0.02).state == "unavailable"
+    with pytest.raises(TimeoutError):
+        probe.close(0.02)
+    assert not backend.finished.is_set()
+    pipeline.internal_thread.loop.call_soon_threadsafe(backend.gate.set)
     probe.close()
     assert backend.finished.is_set()
     assert probe.check().state == "dead"
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_close_drains_executor_backed_health(pipeline: SimpleNamespace, fails: bool) -> None:
+    """复现两版 TurboMind 的执行器调用；协程结束不能代替底层线程结束。"""
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    calls = []
+
+    def native_health() -> dict[str, bool]:
+        """模拟仍在访问模型通信器的工作线程，正常和异常返回都要先排空。"""
+        calls.append(1)
+        entered.set()
+        try:
+            assert release.wait(5)
+            if fails:
+                raise RuntimeError("health worker failed")
+            return {"alive": True}
+        finally:
+            finished.set()
+
+    with ThreadPoolExecutor(1) as health_executor:
+        async def get_health_status() -> dict[str, bool]:
+            """沿用 LMDeploy 0.17/0.18 TurboMind 的真实公开接口实现方式。"""
+            return await asyncio.get_running_loop().run_in_executor(health_executor, native_health)
+
+        pipeline.async_engine.engine.get_health_status = get_health_status
+        probe = LmdeployHealthProbe(pipeline)
+        try:
+            assert probe.check(0.02).state == "unavailable"
+            assert entered.wait(2)
+            for _ in range(2):
+                with pytest.raises(TimeoutError, match="did not finish"):
+                    probe.close(0.02)
+            assert not finished.is_set()
+            assert probe.check().state == "dead"
+            assert len(calls) == 1
+        finally:
+            release.set()
+            probe.close(2)
+        assert finished.is_set()
+
+
+def test_close_waits_for_executor_worker_without_deadline(pipeline: SimpleNamespace) -> None:
+    """宿主已有进程级关闭期限时，探测租约必须持续到工作线程真实退出。"""
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def native_health() -> dict[str, bool]:
+        """保留一个可控的在途健康工作。"""
+        entered.set()
+        assert release.wait(5)
+        finished.set()
+        return {"alive": True}
+
+    with ThreadPoolExecutor(1) as health_executor, ThreadPoolExecutor(2) as callers:
+        async def get_health_status() -> dict[str, bool]:
+            """使关闭协程和底层线程的完成时刻可以明确区分。"""
+            return await asyncio.get_running_loop().run_in_executor(health_executor, native_health)
+
+        pipeline.async_engine.engine.get_health_status = get_health_status
+        probe = LmdeployHealthProbe(pipeline)
+        assert probe.check(0.02).state == "unavailable"
+        assert entered.wait(2)
+        closing = [callers.submit(probe.close, None) for _ in range(2)]
+        try:
+            for call in closing:
+                with pytest.raises(FutureTimeoutError):
+                    call.result(0.03)
+            assert not finished.is_set()
+        finally:
+            release.set()
+            for call in closing:
+                call.result(2)
+        assert finished.is_set()
 
 
 def test_close_before_probe_starts_does_not_leak_or_wait_forever(pipeline: SimpleNamespace) -> None:
@@ -132,6 +210,92 @@ def test_close_before_probe_starts_does_not_leak_or_wait_forever(pipeline: Simpl
         block.set()
         closing.result(timeout=2)
     assert probe.check().state == "dead"
+
+
+def test_close_after_task_creation_skips_unstarted_backend(pipeline: SimpleNamespace) -> None:
+    """任务已创建但尚未首次执行时关闭，不能在随后启动迟到的后端工作。"""
+    probe = LmdeployHealthProbe(pipeline)
+    start = probe._start
+
+    def start_then_close(future: Any) -> None:
+        """在同一个循环回调内完成创建和关闭，固定首次执行之前的竞态。"""
+        start(future)
+        with pytest.raises(TimeoutError):
+            probe.close(0)
+
+    probe._start = start_then_close
+    assert probe.check().state == "dead"
+    probe.close()
+    assert pipeline.async_engine.engine.calls == 0
+
+
+def test_external_cancellation_is_not_confirmed_drainage(pipeline: SimpleNamespace) -> None:
+    """外部取消丢失线程完成信号时，关闭不能虚报成功或再提交一个健康任务。"""
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def native_health() -> dict[str, bool]:
+        """模拟被取消协程遗留的真实工作线程。"""
+        entered.set()
+        assert release.wait(5)
+        finished.set()
+        return {"alive": True}
+
+    with ThreadPoolExecutor(1) as executor:
+        async def get_health_status() -> dict[str, bool]:
+            """取消此协程会取消等待 Future，但不会终止已经运行的线程。"""
+            return await asyncio.get_running_loop().run_in_executor(executor, native_health)
+
+        pipeline.async_engine.engine.get_health_status = get_health_status
+        probe = LmdeployHealthProbe(pipeline)
+        try:
+            assert probe.check(0.02).state == "unavailable"
+            assert entered.wait(2)
+            pipeline.internal_thread.loop.call_soon_threadsafe(probe._task.cancel)
+            assert probe.check().state == "unavailable"
+            with pytest.raises(TimeoutError):
+                probe.close(0.02)
+            assert not finished.is_set()
+        finally:
+            release.set()
+
+
+def test_client_aclose_cancellation_keeps_probe_lease(pipeline: SimpleNamespace) -> None:
+    """取消客户端异步关闭时仍要排空正在执行的健康工作。"""
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def native_health() -> dict[str, bool]:
+        """用可控工作线程验证取消不能先于资源使用结束返回。"""
+        entered.set()
+        assert release.wait(5)
+        finished.set()
+        return {"alive": True}
+
+    with ThreadPoolExecutor(1) as executor:
+        async def get_health_status() -> dict[str, bool]:
+            """让真实客户端关闭路径观察执行器工作。"""
+            return await asyncio.get_running_loop().run_in_executor(executor, native_health)
+
+        pipeline.async_engine.engine.get_health_status = get_health_status
+        client = object.__new__(LmdeployEngineVlmClient)
+        client._health_probe = LmdeployHealthProbe(pipeline)
+        assert client.probe_health(0.02).state == "unavailable"
+        assert entered.wait(2)
+        async def close_client() -> None:
+            """沿用项目既有 asyncio.run 测试方式，不引入额外测试插件依赖。"""
+            closing = asyncio.create_task(client.aclose())
+            try:
+                await asyncio.sleep(0)
+                closing.cancel()
+                await asyncio.sleep(0.03)
+                assert not closing.done() and not finished.is_set()
+            finally:
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await closing
+
+        asyncio.run(close_client())
+        assert finished.is_set()
+        client.close_health_probe()
 
 
 @pytest.mark.parametrize("codes", [("internal_error", "engine_unavailable"), ("engine_unavailable", "internal_error")])

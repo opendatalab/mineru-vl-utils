@@ -28,6 +28,8 @@ class LmdeployHealthProbe:
 
     async def _probe(self) -> EngineHealth:
         """在引擎循环内读取两版共同接口，睡眠和异常探测不等同于死亡。"""
+        if self._closed:
+            return EngineHealth("dead", "LMDeploy health probe is closed")
         engine = self._pipeline.async_engine
         if engine.is_sleeping:
             return EngineHealth("unavailable", "LMDeploy engine is sleeping")
@@ -37,12 +39,14 @@ class LmdeployHealthProbe:
         return EngineHealth("healthy" if status["alive"] else "dead", str(status.get("message") or ""))
 
     def _finish(self, future: Future[EngineHealth], task: asyncio.Task[EngineHealth]) -> None:
-        """任务真正结束后再通知同步等待者，覆盖首次运行前就取消的情况。"""
+        """只有后端实际返回才能确认排空；外部取消会丢失执行器完成信号。"""
         with self._lock:
             try:
                 future.set_result(task.result())
             except asyncio.CancelledError:
-                future.set_result(EngineHealth("unavailable", "LMDeploy health probe canceled during shutdown"))
+                future.set_result(EngineHealth("unavailable", "LMDeploy health probe canceled before backend completion"))
+                self._task = None
+                return
             except BaseException as exc:
                 future.set_exception(exc)
             self._task = None
@@ -57,12 +61,6 @@ class LmdeployHealthProbe:
                 return
             self._task = asyncio.create_task(self._probe())
             self._task.add_done_callback(partial(self._finish, future))
-
-    def _cancel(self) -> None:
-        """仅在 Pipeline 循环中请求取消，不把 Future 取消误当作资源清理完成。"""
-        with self._lock:
-            if self._task is not None:
-                self._task.cancel()
 
     def check(self, timeout: float = 5.0) -> EngineHealth:
         """超时保留同一个 Future 供下次检查，不排队创建更多后台探测。"""
@@ -93,15 +91,12 @@ class LmdeployHealthProbe:
                 if self._future is future and future.done() and self._finished.is_set():
                     self._future = None
 
-    def close(self, timeout: float = 5.0) -> None:
-        """停止接收探测并等待已提交调用退出，不关闭宿主提供的引擎。"""
+    def close(self, timeout: float | None = 5.0) -> None:
+        """停止接收探测并等待真实完成；超时不取消工作，None 交由宿主管理整体期限。"""
         with self._lock:
             self._closed = True
-            future = self._future
-            if future is not None:
-                loop = self._pipeline.internal_thread.loop
-                if not loop.is_closed():
-                    loop.call_soon_threadsafe(self._cancel)
+        # TurboMind 的协程取消不会停止 run_in_executor 中仍访问模型通信器的线程。
+        # 保留原探测及其完成信号，关闭超时后调用方仍可再次等待，不能提前释放 Pipeline。
         if not self._finished.wait(timeout):
             raise TimeoutError("LMDeploy health probe did not finish during client shutdown")
 

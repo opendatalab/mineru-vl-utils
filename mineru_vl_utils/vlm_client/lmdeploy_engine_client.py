@@ -96,9 +96,9 @@ class LmdeployEngineVlmClient(VlmClient):
         """只排空客户端自有的探测，Pipeline 仍由创建它的宿主负责关闭。"""
         await run_in_thread_until_complete(self._health_probe.close)
 
-    def close_health_probe(self) -> None:
-        """同步宿主及解释器退出时直接关闭探测，不向已停止的线程池提交任务。"""
-        self._health_probe.close()
+    def close_health_probe(self, timeout: float | None = 5.0) -> None:
+        """同步关闭探测；已有进程关闭期限的宿主可用 None 等待实际排空。"""
+        self._health_probe.close(timeout)
 
     def build_lmdeploy_generation_config(self, sampling_params: SamplingParams | None):
         sp = self.build_sampling_params(sampling_params)

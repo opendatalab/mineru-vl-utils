@@ -63,6 +63,13 @@ vLLM health checking raises `EngineUnavailableError` so callers retain the origi
 probe failure is temporary unavailability, never proof of engine death. Probes do not initialize models or run inference.
 There is at most one outstanding probe per client; timeout keeps that probe for subsequent observation.
 
+LMDeploy shutdown also preserves an in-flight health call: canceling its coroutine would not stop TurboMind's
+executor worker. Client close waits up to five seconds and raises `TimeoutError` if completion is unconfirmed.
+Keep the supplied Pipeline and its loop alive, then retry closing; a timed-out close is not permission to release
+the engine. Hosts with an outer process-shutdown deadline can use `close_health_probe(timeout=None)` to wait for
+actual drainage before releasing the Pipeline. Stopping the loop or externally canceling the probe first prevents
+the client from confirming drainage.
+
 `await client.aclose()` drains owned HTTP connections or health probes. It does not shut down injected engines/executors,
 kill the host, or rebuild a model. Drain extraction tasks before closing the client. The owning application controls permanent
 failure latching, admission, task cleanup, and replacement. MLX keeps per-model serialization and closes each batch generator;
