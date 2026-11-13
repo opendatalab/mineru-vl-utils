@@ -16,6 +16,13 @@ from .base_client import EngineUnavailableError, ImageType, RequestError, Single
 T = TypeVar("T")
 P = ParamSpec("P")
 VLM_PREDICT_DESC = "VLM Predict"
+# 内部清理取消携带独立标记，不能与调用方主动取消混为一谈。
+_BATCH_FAILURE_CANCEL = object()
+
+
+def _is_batch_failure_cancel(error: BaseException) -> bool:
+    """只识别批次收集器发出的取消，并允许标记穿过嵌套批次。"""
+    return isinstance(error, asyncio.CancelledError) and any(arg is _BATCH_FAILURE_CANCEL for arg in error.args)
 
 
 def vlm_predict_progress(*args: Any, **kwargs: Any) -> tqdm:
@@ -30,7 +37,7 @@ async def run_in_thread_until_complete(function: Callable[P, T], *args: P.args, 
     try:
         await asyncio.wait([work])
         return work.result()
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as cancellation:
         while not work.done():
             try:
                 await asyncio.wait([work])
@@ -39,7 +46,10 @@ async def run_in_thread_until_complete(function: Callable[P, T], *args: P.args, 
             except Exception:
                 break
         if not work.cancelled():
-            work.exception()
+            error = work.exception()
+            if error is not None and _is_batch_failure_cancel(cancellation) and EngineUnavailableError.find_in(error):
+                # 同批失败引起的取消仍要上报真实死亡；调用方主动取消保留原有语义。
+                raise error
         raise
 
 
@@ -198,8 +208,12 @@ async def gather_tasks(
                 pbar.update(len(done))
     except (Exception, asyncio.CancelledError) as primary:
         # 子任务失败或父协程取消时，先取消未完成任务，再等待各任务完成自身清理。
+        failure_cleanup = isinstance(primary, Exception) or _is_batch_failure_cancel(primary)
         for task in pending:
-            task.cancel()
+            if failure_cleanup:
+                task.cancel(_BATCH_FAILURE_CANCEL)
+            else:
+                task.cancel()
         cleanup = asyncio.gather(*task_set, return_exceptions=True)
         while not cleanup.done():
             try:
@@ -207,7 +221,7 @@ async def gather_tasks(
             except asyncio.CancelledError:
                 continue
         results = cleanup.result()
-        if isinstance(primary, Exception) and EngineUnavailableError.find_in(primary) is None:
+        if failure_cleanup and EngineUnavailableError.find_in(primary) is None:
             # 清理期间才到达的明确死亡优先于普通请求错误；取消仍保留调用方原意。
             for result in results:
                 if isinstance(result, Exception) and EngineUnavailableError.find_in(result) is not None:

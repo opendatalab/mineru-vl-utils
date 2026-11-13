@@ -48,6 +48,8 @@ LMDeploy retains its structured error code and details. llama.cpp wraps only nat
 (including `EngineClosedError`); ordinary native `EngineError` remains a request-level server error. The original
 exception in `__cause__` preserves native `error_type`, `code` and `details`. Block isolation never suppresses confirmed engine failure, including
 wrapped exceptions, exception groups, and a fatal error observed while draining sibling tasks.
+Batch failure cleanup preserves fatal errors from synchronous workers, including nested batches;
+explicit caller cancellation still drains the workers and propagates cancellation.
 Catch this public exception instead of catching vLLM's native `EngineDeadError` directly. `EngineUnavailableError.find_in(error)`
 also locates the signal in an exception chain or group. Ordinary request failures retain their existing behavior.
 
