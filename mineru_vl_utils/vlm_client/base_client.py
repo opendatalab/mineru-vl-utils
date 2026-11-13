@@ -21,7 +21,29 @@ class RequestError(ValueError):
 
 
 class ServerError(RuntimeError):
-    pass
+    """服务端推理错误，可携带后端原始结构化诊断。"""
+
+    def __init__(self, *args: object, error_code: str | None = None, error_message: str | None = None) -> None:
+        """保留 RuntimeError 的原始参数语义，并附带可选错误码和详情。"""
+        self.error_code = error_code
+        self.error_message = error_message
+        super().__init__(*args)
+
+
+class EngineUnavailableError(ServerError):
+    """后端明确报告引擎不可用，保留结构化错误信息供宿主终止相关工作。"""
+
+    def __init__(self, message: str, *, error_code: str = "engine_unavailable", error_message: str | None = None) -> None:
+        """保留后端原始错误码和详情，异常链仍由调用方正常传播。"""
+        super().__init__(message, error_code=error_code, error_message=error_message or message)
+
+
+@dataclass(frozen=True)
+class EngineHealth:
+    """区分健康、暂时不可用和明确死亡，避免将探测超时误报为引擎死亡。"""
+
+    state: Literal["healthy", "unavailable", "dead"]
+    message: str = ""
 
 
 class HttpResponseError(ServerError):
@@ -88,6 +110,10 @@ def compute_confidence_metrics(
 
 
 class VlmClient:
+    def probe_health(self, timeout: float = 5.0) -> EngineHealth:
+        """未提供健康协议的后端显式拒绝，不能伪造健康状态。"""
+        raise UnsupportedError(f"Health probing is not supported by {type(self).__name__}")
+
     def __init__(
         self,
         *,

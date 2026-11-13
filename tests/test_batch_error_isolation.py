@@ -9,7 +9,13 @@ import pytest
 from PIL import Image
 
 from mineru_vl_utils import MinerUClient
-from mineru_vl_utils.vlm_client.base_client import HttpResponseError, UnsupportedError, VlmClient, new_vlm_client
+from mineru_vl_utils.vlm_client.base_client import (
+    EngineUnavailableError,
+    HttpResponseError,
+    UnsupportedError,
+    VlmClient,
+    new_vlm_client,
+)
 from mineru_vl_utils.vlm_client.http_client import HttpVlmClient
 from mineru_vl_utils.vlm_client.llama_cpp_engine_client import LlamaCppEngineVlmClient
 from mineru_vl_utils.vlm_client.lmdeploy_engine_client import LmdeployEngineVlmClient
@@ -90,6 +96,7 @@ def test_all_failed_raises_first_input_error_but_empty_success_counts(cls, valid
         KeyError("program error"),
         IndexError("program error"),
         RuntimeError("engine stopped"),
+        EngineUnavailableError("engine unavailable"),
     ],
 )
 def test_fatal_error_is_never_isolated(cls, error):
