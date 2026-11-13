@@ -71,6 +71,17 @@ def check_version(cache: Path, version: str) -> dict:
     method(llm, "get_tokenizer")
     method(asynchronous, "from_engine_args")
     method(asynchronous, "tokenizer")
+    method(asynchronous, "check_health")
+    method(asynchronous, "shutdown")
+    errors_source = source(cache, version, "vllm/v1/engine/exceptions.py")
+    fatal = class_node(errors_source, "EngineDeadError")
+    # 保留支持范围内真实继承变化的证据，不能假设致命错误继承 RuntimeError。
+    fatal_bases = [ast.unparse(base) for base in fatal.bases]
+    assert fatal_bases in (["Exception"], ["VLLMServerError"]), (version, fatal_bases)
+    if fatal_bases == ["VLLMServerError"]:
+        base_source = source(cache, version, "vllm/exceptions.py")
+        assert [ast.unparse(base) for base in class_node(base_source, "VLLMServerError").bases] == ["VLLMError"]
+        assert [ast.unparse(base) for base in class_node(base_source, "VLLMError").bases] == ["Exception"]
     processor = class_node(source(cache, version, "vllm/v1/sample/logits_processor/interface.py"), "LogitsProcessor")
     for name in ("__init__", "apply", "update_state", "is_argmax_invariant"):
         method(processor, name)
@@ -127,6 +138,9 @@ def check_version(cache: Path, version: str) -> dict:
         "success": True,
         "renderer_sha256": hashlib.sha256(renderer_source.encode()).hexdigest(),
         "features": client.vllm_llm.features,
+        "engine_dead_bases": fatal_bases,
+        "engine_errors_sha256": hashlib.sha256(errors_source.encode()).hexdigest(),
+        "public_async_health": True,
     }
 
 

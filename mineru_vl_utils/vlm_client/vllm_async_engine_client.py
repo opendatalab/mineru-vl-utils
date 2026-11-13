@@ -7,10 +7,10 @@ from loguru import logger
 if TYPE_CHECKING:
     from vllm.outputs import RequestOutput
 
-from .batch_errors import BlockPredictionResult, capture_block_error, collect_block_results
 from .base_client import (
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_USER_PROMPT,
+    EngineHealth,
     ImageType,
     RequestError,
     SamplingParams,
@@ -20,11 +20,16 @@ from .base_client import (
     VlmClient,
     compute_confidence_metrics,
 )
+from .batch_errors import BlockPredictionResult, capture_block_error, collect_block_results
 from .utils import aio_image_to_obj_list, gather_tasks
 from .vllm_engine_client import _build_raw_vllm_prompt
+from .vllm_errors import vllm_error_scope
+from .vllm_health import VllmHealthProbe
 
 
 class VllmAsyncEngineVlmClient(VlmClient):
+    health_probe_mode = "async"
+
     def __init__(
         self,
         vllm_async_llm,  # vllm.v1.engine.async_llm.AsyncLLM instance
@@ -73,6 +78,15 @@ class VllmAsyncEngineVlmClient(VlmClient):
         self.VllmRequestOutputKind = RequestOutputKind
         self.max_concurrency = max_concurrency
         self.debug = debug
+        self._health_probe = VllmHealthProbe(vllm_async_llm.check_health)
+
+    async def aio_probe_health(self, timeout: float = 5.0) -> EngineHealth:
+        """在引擎所属循环执行唯一探测，明确死亡保留原始异常链。"""
+        return await self._health_probe.check(timeout)
+
+    async def aclose(self) -> None:
+        """只关闭客户端自有探测，注入的引擎仍由宿主负责关闭。"""
+        await self._health_probe.aclose()
 
     def build_messages(self, prompt: str, num_images: int) -> list[dict]:
         prompt = prompt or self.prompt
@@ -197,35 +211,36 @@ class VllmAsyncEngineVlmClient(VlmClient):
         sampling_params: SamplingParams | None = None,
         priority: int | None = None,
     ) -> str:
-        image = await aio_image_to_obj_list(image)
+        with vllm_error_scope():
+            image = await aio_image_to_obj_list(image)
 
-        chat_prompt: str = self.tokenizer.apply_chat_template(
-            self.build_messages(prompt, len(image)),
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+            chat_prompt: str = self.tokenizer.apply_chat_template(
+                self.build_messages(prompt, len(image)),
+                tokenize=False,
+                add_generation_prompt=True,
+            )
 
-        vllm_sp = self.build_vllm_sampling_params(sampling_params)
+            vllm_sp = self.build_vllm_sampling_params(sampling_params)
 
-        generate_kwargs = {}
-        if priority is not None:
-            generate_kwargs["priority"] = priority
+            generate_kwargs = {}
+            if priority is not None:
+                generate_kwargs["priority"] = priority
 
-        vllm_prompt = await self._render_vllm_cmpl_input(_build_raw_vllm_prompt(chat_prompt, image))
+            vllm_prompt = await self._render_vllm_cmpl_input(_build_raw_vllm_prompt(chat_prompt, image))
 
-        last_output = None
-        async for output in self.vllm_async_llm.generate(
-            prompt=vllm_prompt,
-            sampling_params=vllm_sp,
-            request_id=str(uuid.uuid4()),
-            **generate_kwargs,
-        ):
-            last_output = output
+            last_output = None
+            async for output in self.vllm_async_llm.generate(
+                prompt=vllm_prompt,
+                sampling_params=vllm_sp,
+                request_id=str(uuid.uuid4()),
+                **generate_kwargs,
+            ):
+                last_output = output
 
-        if last_output is None:  # this should not happen
-            raise ServerError("No output from the server.")
+            if last_output is None:  # this should not happen
+                raise ServerError("No output from the server.")
 
-        return self.get_output_content(last_output)
+            return self.get_output_content(last_output)
 
     async def aio_batch_predict(
         self,
@@ -263,24 +278,31 @@ class VllmAsyncEngineVlmClient(VlmClient):
                 try:
                     return BlockPredictionResult(
                         await self.aio_predict(
-                            image=image, prompt=prompt, sampling_params=sampling_params, priority=priority,
+                            image=image,
+                            prompt=prompt,
+                            sampling_params=sampling_params,
+                            priority=priority,
                         )
                     )
                 except Exception as exc:
                     return capture_block_error(
-                        exc, enabled=getattr(self, "isolate_block_errors", False),
-                        backend=type(self).__name__, index=index,
+                        exc,
+                        enabled=getattr(self, "isolate_block_errors", False),
+                        backend=type(self).__name__,
+                        index=index,
                     )
 
         results = await gather_tasks(
             tasks=[
                 predict_with_semaphore(index, *args)
-                for index, args in enumerate(zip(
-                    images,
-                    prompts,
-                    sampling_params,
-                    priority,
-                ))
+                for index, args in enumerate(
+                    zip(
+                        images,
+                        prompts,
+                        sampling_params,
+                        priority,
+                    )
+                )
             ],
             use_tqdm=use_tqdm,
             tqdm_desc=tqdm_desc,
@@ -315,36 +337,37 @@ class VllmAsyncEngineVlmClient(VlmClient):
         sampling_params: SamplingParams | None = None,
         priority: int | None = None,
     ) -> ScoredOutput:
-        image = await aio_image_to_obj_list(image)
+        with vllm_error_scope():
+            image = await aio_image_to_obj_list(image)
 
-        chat_prompt: str = self.tokenizer.apply_chat_template(
-            self.build_messages(prompt, len(image)),
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+            chat_prompt: str = self.tokenizer.apply_chat_template(
+                self.build_messages(prompt, len(image)),
+                tokenize=False,
+                add_generation_prompt=True,
+            )
 
-        vllm_sp = self.build_vllm_sampling_params(sampling_params)
-        vllm_sp.logprobs = 0
+            vllm_sp = self.build_vllm_sampling_params(sampling_params)
+            vllm_sp.logprobs = 0
 
-        generate_kwargs = {}
-        if priority is not None:
-            generate_kwargs["priority"] = priority
+            generate_kwargs = {}
+            if priority is not None:
+                generate_kwargs["priority"] = priority
 
-        vllm_prompt = await self._render_vllm_cmpl_input(_build_raw_vllm_prompt(chat_prompt, image))
+            vllm_prompt = await self._render_vllm_cmpl_input(_build_raw_vllm_prompt(chat_prompt, image))
 
-        last_output = None
-        async for output in self.vllm_async_llm.generate(
-            prompt=vllm_prompt,
-            sampling_params=vllm_sp,
-            request_id=str(uuid.uuid4()),
-            **generate_kwargs,
-        ):
-            last_output = output
+            last_output = None
+            async for output in self.vllm_async_llm.generate(
+                prompt=vllm_prompt,
+                sampling_params=vllm_sp,
+                request_id=str(uuid.uuid4()),
+                **generate_kwargs,
+            ):
+                last_output = output
 
-        if last_output is None:
-            raise ServerError("No output from the server.")
+            if last_output is None:
+                raise ServerError("No output from the server.")
 
-        return self._get_output_scored(last_output)
+            return self._get_output_scored(last_output)
 
     async def aio_batch_predict_scored(
         self,
@@ -454,35 +477,36 @@ class VllmAsyncEngineVlmClient(VlmClient):
         sampling_params: SamplingParams | None = None,
         priority: int | None = None,
     ) -> ScoredOutput:
-        image_list = await aio_image_to_obj_list(image)
+        with vllm_error_scope():
+            image_list = await aio_image_to_obj_list(image)
 
-        full_prompt, scored_token_count = self._build_score_prompt_pair(prompt, len(image_list), scored_text)
+            full_prompt, scored_token_count = self._build_score_prompt_pair(prompt, len(image_list), scored_text)
 
-        vllm_sp = self.build_vllm_sampling_params(sampling_params)
-        vllm_sp.prompt_logprobs = 0
-        vllm_sp.max_tokens = 1
+            vllm_sp = self.build_vllm_sampling_params(sampling_params)
+            vllm_sp.prompt_logprobs = 0
+            vllm_sp.max_tokens = 1
 
-        generate_kwargs = {}
-        if priority is not None:
-            generate_kwargs["priority"] = priority
+            generate_kwargs = {}
+            if priority is not None:
+                generate_kwargs["priority"] = priority
 
-        vllm_prompt = await self._render_vllm_cmpl_input(_build_raw_vllm_prompt(full_prompt, image_list))
+            vllm_prompt = await self._render_vllm_cmpl_input(_build_raw_vllm_prompt(full_prompt, image_list))
 
-        last_output = None
-        async for output in self.vllm_async_llm.generate(
-            prompt=vllm_prompt,
-            sampling_params=vllm_sp,
-            request_id=str(uuid.uuid4()),
-            **generate_kwargs,
-        ):
-            last_output = output
+            last_output = None
+            async for output in self.vllm_async_llm.generate(
+                prompt=vllm_prompt,
+                sampling_params=vllm_sp,
+                request_id=str(uuid.uuid4()),
+                **generate_kwargs,
+            ):
+                last_output = output
 
-        if last_output is None:
-            raise ServerError("No output from the server.")
+            if last_output is None:
+                raise ServerError("No output from the server.")
 
-        scored_output = self._extract_prompt_logprobs(last_output, scored_token_count)
-        scored_output.text = scored_text
-        return scored_output
+            scored_output = self._extract_prompt_logprobs(last_output, scored_token_count)
+            scored_output.text = scored_text
+            return scored_output
 
     async def aio_batch_score(
         self,

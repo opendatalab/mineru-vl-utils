@@ -42,6 +42,8 @@ def _inference_error(outputs: Sequence[Any], message: str) -> ServerError:
 
 
 class LmdeployEngineVlmClient(VlmClient):
+    health_probe_mode = "sync"
+
     def __init__(
         self,
         lmdeploy_engine,  # LMDeploy 0.17 的公开 Pipeline 实例

@@ -742,7 +742,7 @@ class MinerUClient:
 
     async def aclose(self) -> None:
         """关闭自有 HTTP 连接或健康探测，不关闭调用方提供的引擎或 executor。"""
-        if self.backend in {"http-client", "lmdeploy-engine"}:
+        if self.backend in {"http-client", "lmdeploy-engine", "vllm-async-engine"}:
             await self.client.aclose()
 
     # ------------------------------------------------------------------

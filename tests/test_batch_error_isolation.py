@@ -275,7 +275,7 @@ def test_lmdeploy_real_thread_path_preserves_single_strictness(enabled, use_asyn
         client.predict(None, "bad")
 
 
-def test_vllm_real_generation_and_scored_batch_remain_strict():
+def test_vllm_real_generation_and_scored_batch_remain_strict(native_errors):
     """普通批量经真实 generate 解析降级，评分批量仍传播原异常。"""
     calls = []
     client = object.__new__(VllmAsyncEngineVlmClient)
