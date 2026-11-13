@@ -11,11 +11,18 @@ import httpx
 from PIL import Image
 from tqdm import tqdm
 
-from .base_client import ImageType, RequestError, SingleImageType
+from .base_client import EngineUnavailableError, ImageType, RequestError, SingleImageType
 
 T = TypeVar("T")
 P = ParamSpec("P")
 VLM_PREDICT_DESC = "VLM Predict"
+# 内部清理取消携带独立标记，不能与调用方主动取消混为一谈。
+_BATCH_FAILURE_CANCEL = object()
+
+
+def _is_batch_failure_cancel(error: BaseException) -> bool:
+    """只识别批次收集器发出的取消，并允许标记穿过嵌套批次。"""
+    return isinstance(error, asyncio.CancelledError) and any(arg is _BATCH_FAILURE_CANCEL for arg in error.args)
 
 
 def vlm_predict_progress(*args: Any, **kwargs: Any) -> tqdm:
@@ -28,17 +35,21 @@ async def run_in_thread_until_complete(function: Callable[P, T], *args: P.args, 
     """取消时等待同步线程结束，避免调用方释放仍被推理线程使用的模型租约。"""
     work = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
     try:
-        return await asyncio.shield(work)
-    except asyncio.CancelledError:
+        await asyncio.wait([work])
+        return work.result()
+    except asyncio.CancelledError as cancellation:
         while not work.done():
             try:
-                await asyncio.shield(work)
+                await asyncio.wait([work])
             except asyncio.CancelledError:
                 continue
             except Exception:
                 break
         if not work.cancelled():
-            work.exception()
+            error = work.exception()
+            if error is not None and _is_batch_failure_cancel(cancellation) and EngineUnavailableError.find_in(error):
+                # 同批失败引起的取消仍要上报真实死亡；调用方主动取消保留原有语义。
+                raise error
         raise
 
 
@@ -195,17 +206,26 @@ async def gather_tasks(
                 for done_task in done:
                     done_task.result()
                 pbar.update(len(done))
-    except (Exception, asyncio.CancelledError):
+    except (Exception, asyncio.CancelledError) as primary:
         # 子任务失败或父协程取消时，先取消未完成任务，再等待各任务完成自身清理。
+        failure_cleanup = isinstance(primary, Exception) or _is_batch_failure_cancel(primary)
         for task in pending:
-            task.cancel()
+            if failure_cleanup:
+                task.cancel(_BATCH_FAILURE_CANCEL)
+            else:
+                task.cancel()
         cleanup = asyncio.gather(*task_set, return_exceptions=True)
         while not cleanup.done():
             try:
-                await asyncio.shield(cleanup)
+                await asyncio.wait([cleanup])
             except asyncio.CancelledError:
                 continue
-        cleanup.result()
+        results = cleanup.result()
+        if failure_cleanup and EngineUnavailableError.find_in(primary) is None:
+            # 清理期间才到达的明确死亡优先于普通请求错误；取消仍保留调用方原意。
+            for result in results:
+                if isinstance(result, Exception) and EngineUnavailableError.find_in(result) is not None:
+                    raise result
         raise
 
     return [task.result() for task in task_list]

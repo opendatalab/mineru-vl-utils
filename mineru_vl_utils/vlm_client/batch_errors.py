@@ -5,7 +5,7 @@ from typing import Sequence
 
 from loguru import logger
 
-from .base_client import ClientClosedError, HttpResponseError, ServerError
+from .base_client import ClientClosedError, EngineUnavailableError, HttpResponseError, ServerError
 
 
 @dataclass
@@ -27,6 +27,7 @@ def capture_block_error(error: Exception, *, enabled: bool, backend: str, index:
         not enabled
         or fatal_http
         or fatal_runtime
+        or EngineUnavailableError.find_in(error) is not None
         or isinstance(
             error, (ClientClosedError, MemoryError, AssertionError, AttributeError, TypeError, LookupError, NotImplementedError)
         )
