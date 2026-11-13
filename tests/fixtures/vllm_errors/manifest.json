@@ -1,0 +1,17 @@
+[
+  {
+    "file": "0.19.1-vllm_v1_engine_exceptions.py.txt",
+    "url": "https://raw.githubusercontent.com/vllm-project/vllm/v0.19.1/vllm/v1/engine/exceptions.py",
+    "sha256": "52abba6d4284bcc629795258c65a987af79171df569ec15410d2add092cc8a7b"
+  },
+  {
+    "file": "0.30.0-vllm_v1_engine_exceptions.py.txt",
+    "url": "https://raw.githubusercontent.com/vllm-project/vllm/v0.30.0/vllm/v1/engine/exceptions.py",
+    "sha256": "87b2557fdc63c63d964729b92f2cf01359e956ddf0b37f8185fbf21e389242da"
+  },
+  {
+    "file": "0.30.0-vllm_exceptions.py.txt",
+    "url": "https://raw.githubusercontent.com/vllm-project/vllm/v0.30.0/vllm/exceptions.py",
+    "sha256": "06c77c8129ac024455ace7c89168cd8e2284d70e5d96b326782b5f110ff73e7a"
+  }
+]

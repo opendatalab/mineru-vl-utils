@@ -741,8 +741,8 @@ class MinerUClient:
             self.batching_mode = "stepping"
 
     async def aclose(self) -> None:
-        """只关闭自有 HTTP 连接，不关闭调用方提供的引擎或 executor。"""
-        if self.backend == "http-client":
+        """关闭自有 HTTP 连接或健康探测，不关闭调用方提供的引擎或 executor。"""
+        if self.backend in {"http-client", "lmdeploy-engine", "vllm-async-engine"}:
             await self.client.aclose()
 
     # ------------------------------------------------------------------

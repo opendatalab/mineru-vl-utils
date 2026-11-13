@@ -1,5 +1,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Sequence
 
 from loguru import logger
@@ -12,12 +14,15 @@ from .batch_errors import BlockPredictionResult, capture_block_error, collect_bl
 from .base_client import (
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_USER_PROMPT,
+    EngineHealth,
+    EngineUnavailableError,
     ImageType,
     RequestError,
     SamplingParams,
     ServerError,
     VlmClient,
 )
+from .exception_chain import iter_exception_chain
 from .utils import (
     VLM_PREDICT_DESC,
     aio_image_to_bytes_list_and_format,
@@ -28,6 +33,8 @@ from .utils import (
 
 
 class LlamaCppEngineVlmClient(VlmClient):
+    health_probe_mode = "sync"
+
     def __init__(
         self,
         llama_cpp_engine,  # mineru_llama_cpp.Engine instance
@@ -53,11 +60,12 @@ class LlamaCppEngineVlmClient(VlmClient):
 
         try:
             from mineru_llama_cpp import EngineError as LlamaCppEngineError
+            from mineru_llama_cpp import EngineUnavailableError as LlamaCppUnavailableError
             from mineru_llama_cpp import Engine as LlamaCppEngine
             from mineru_llama_cpp import InvalidRequestError as LlamaCppInvalidRequestError
             from mineru_llama_cpp import SamplingParams as LlamaCppSamplingParams
         except ImportError:
-            raise ImportError("Please install mineru-llama-cpp to use LlamaCppEngineVlmClient.")
+            raise ImportError("Please install mineru-llama-cpp>=0.2.1 to use LlamaCppEngineVlmClient.")
 
         if not llama_cpp_engine:
             raise ValueError("llama_cpp_engine is None.")
@@ -68,9 +76,45 @@ class LlamaCppEngineVlmClient(VlmClient):
         self.LlamaCppSamplingParams = LlamaCppSamplingParams
         self.LlamaCppInvalidRequestError = LlamaCppInvalidRequestError
         self.LlamaCppEngineError = LlamaCppEngineError
+        self.LlamaCppUnavailableError = LlamaCppUnavailableError
         self.max_concurrency = max_concurrency
         self.debug = debug
         self.use_tqdm = use_tqdm
+
+    def _fatal_error(self, error: Exception) -> EngineUnavailableError:
+        """仅包装底层精确的实例失效异常，完整诊断通过显式异常链保留。"""
+        return EngineUnavailableError(
+            str(error),
+            error_code=str(error.code or "engine_dead"),
+            error_message=str(error),
+        )
+
+    @contextmanager
+    def _error_scope(self) -> Iterator[None]:
+        """在真实调用边界统一转换，包装异常或异常组内的明确死亡仍优先。"""
+        try:
+            yield
+        except Exception as error:
+            fatal = next(
+                (item for item in iter_exception_chain(error) if isinstance(item, self.LlamaCppUnavailableError)), None
+            )
+            if fatal is not None:
+                raise self._fatal_error(fatal) from error
+            if isinstance(error, self.LlamaCppInvalidRequestError):
+                raise RequestError(str(error)) from error
+            if isinstance(error, self.LlamaCppEngineError):
+                raise ServerError(
+                    str(error), error_code=str(error.code) if error.code is not None else None, error_message=str(error)
+                ) from error
+            raise
+
+    def probe_health(self, timeout: float = 5.0) -> EngineHealth:
+        """读取底层线程终止快照，不加载模型、不创建探测任务或关闭注入引擎。"""
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
+        with self._error_scope():
+            self.llama_cpp_engine.check_health()
+        return EngineHealth("healthy")
 
     def build_messages(self, image_urls: list[str], prompt: str) -> list[dict]:
         prompt = prompt or self.prompt
@@ -150,12 +194,8 @@ class LlamaCppEngineVlmClient(VlmClient):
         if self.debug:
             logger.debug("Messages: {}", messages)
 
-        try:
+        with self._error_scope():
             result = self.llama_cpp_engine.generate(messages, llama_cpp_sp)
-        except self.LlamaCppInvalidRequestError as e:
-            raise RequestError(str(e))
-        except self.LlamaCppEngineError as e:
-            raise ServerError(str(e))
 
         if self.debug:
             logger.debug("Result: {}", result)
@@ -194,17 +234,36 @@ class LlamaCppEngineVlmClient(VlmClient):
                 for index, args in enumerate(zip(images, prompts, sampling_params, priority))
             }
             results = [BlockPredictionResult() for _ in range(images_len)]
+            primary: Exception | None = None
             with tqdm(total=images_len, desc=VLM_PREDICT_DESC, disable=not self.use_tqdm) as pbar:
                 for future in as_completed(futures):
                     # 完成顺序只影响进度显示，内容仍回填到原始请求对应的位置。
                     index = futures[future]
+                    if future.cancelled():
+                        continue
                     try:
                         results[index] = BlockPredictionResult(future.result())
                     except Exception as exc:
-                        results[index] = capture_block_error(
-                            exc, enabled=self.isolate_block_errors, backend=type(self).__name__, index=index,
-                        )
-                    pbar.update(1)
+                        try:
+                            results[index] = capture_block_error(
+                                exc,
+                                enabled=self.isolate_block_errors,
+                                backend=type(self).__name__,
+                                index=index,
+                            )
+                        except Exception as error:
+                            # 保留首个错误，排空期间发现明确死亡时提升其优先级。
+                            if primary is None or (
+                                EngineUnavailableError.find_in(primary) is None
+                                and EngineUnavailableError.find_in(error) is not None
+                            ):
+                                primary = error
+                            for pending in futures:
+                                pending.cancel()
+                    if primary is None:
+                        pbar.update(1)
+                if primary is not None:
+                    raise primary
         return collect_block_results(results)
 
     async def aio_predict(
@@ -222,12 +281,8 @@ class LlamaCppEngineVlmClient(VlmClient):
         if self.debug:
             logger.debug("Messages: {}", messages)
 
-        try:
+        with self._error_scope():
             result = await self.llama_cpp_engine.agenerate(messages, llama_cpp_sp)
-        except self.LlamaCppInvalidRequestError as e:
-            raise RequestError(str(e))
-        except self.LlamaCppEngineError as e:
-            raise ServerError(str(e))
 
         if self.debug:
             logger.debug("Result: {}", result)
@@ -270,13 +325,18 @@ class LlamaCppEngineVlmClient(VlmClient):
                 try:
                     return BlockPredictionResult(
                         await self.aio_predict(
-                            image=image, prompt=prompt, sampling_params=sampling_params, priority=priority,
+                            image=image,
+                            prompt=prompt,
+                            sampling_params=sampling_params,
+                            priority=priority,
                         )
                     )
                 except Exception as exc:
                     return capture_block_error(
-                        exc, enabled=getattr(self, "isolate_block_errors", False),
-                        backend=type(self).__name__, index=index,
+                        exc,
+                        enabled=getattr(self, "isolate_block_errors", False),
+                        backend=type(self).__name__,
+                        index=index,
                     )
 
         results = await gather_tasks(

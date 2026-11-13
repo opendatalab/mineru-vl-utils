@@ -148,3 +148,38 @@ def test_vllm_async_cancellation_reaches_generate_cleanup() -> None:
         assert cleaned
 
     asyncio.run(run())
+
+
+def test_thread_failure_after_cancel_is_drained_without_unhandled_log() -> None:
+    """Python 3.14 取消后线程失败不得重复记录已处理的异常。"""
+    from mineru_vl_utils.vlm_client.utils import run_in_thread_until_complete
+
+    async def run() -> None:
+        """记录循环异常回调，并在重复取消后释放真实工作线程。"""
+        entered, release = threading.Event(), threading.Event()
+        unhandled = []
+        asyncio.get_running_loop().set_exception_handler(lambda loop, context: unhandled.append(context))
+
+        def fail() -> None:
+            """让故障在等待者取消之后才从线程返回。"""
+            entered.set()
+            assert release.wait(3)
+            raise RuntimeError("failure after cancellation")
+
+        task = asyncio.create_task(run_in_thread_until_complete(fail))
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0)
+            assert not unhandled
+        finally:
+            release.set()
+
+    asyncio.run(run())
