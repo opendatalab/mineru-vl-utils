@@ -49,15 +49,11 @@ def test_valid_escaped_cells_survive_the_complete_chart_handler(outer_pipes, lab
 
 def test_header_and_all_data_rows_are_preserved():
     """表头和全部数据行不得因单元格中的竖线而丢失。"""
-    content = "\n".join(
-        [
-            r"| Chan\|nel | Throughput (Mbit/s) |",
-            "| --- | --- |",
-            r"| A \| B | 10 |",
-            r"| C \| D | 20 |",
-            "| E | 30 |",
-        ]
-    )
+    content = r"""| Chan\|nel | Throughput (Mbit/s) |
+| --- | --- |
+| A \| B | 10 |
+| C \| D | 20 |
+| E | 30 |"""
     assert process_image_or_chart(tagged_chart(content))["content"] == content
 
 
