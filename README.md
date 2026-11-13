@@ -40,6 +40,43 @@ client = MinerUClient(
 )
 ```
 
+## Engine health and lifecycle
+
+The adapter reports confirmed, unrecoverable engine failure as `EngineUnavailableError(ServerError)`.
+vLLM synchronous/asynchronous prediction, scored prediction and scoring preserve the original exception as `__cause__`.
+LMDeploy retains its structured error code and details. llama.cpp wraps only native `EngineUnavailableError`
+(including `EngineClosedError`); ordinary native `EngineError` remains a request-level server error. The original
+exception in `__cause__` preserves native `error_type`, `code` and `details`. Block isolation never suppresses confirmed engine failure, including
+wrapped exceptions, exception groups, and a fatal error observed while draining sibling tasks.
+Batch failure cleanup preserves fatal errors from synchronous workers, including nested batches;
+explicit caller cancellation still drains the workers and propagates cancellation.
+Catch this public exception instead of catching vLLM's native `EngineDeadError` directly. `EngineUnavailableError.find_in(error)`
+also locates the signal in an exception chain or group. Ordinary request failures retain their existing behavior.
+
+| Client | `health_probe_mode` | Supported health method |
+| --- | --- | --- |
+| llama.cpp (`mineru-llama-cpp>=0.2.1`) | `sync` | `probe_health(timeout=5.0)`, native loop state snapshot |
+| LMDeploy | `sync` | `probe_health(timeout=5.0)` |
+| vLLM AsyncLLM | `async` | `await aio_probe_health(timeout=5.0)` on the owning loop |
+| vLLM LLM / MLX / other clients | `none` | Explicit `UnsupportedError` |
+
+`EngineHealth.state` distinguishes `healthy`, temporary `unavailable`, and confirmed `dead`. A native fatal exception from
+vLLM health checking raises `EngineUnavailableError` so callers retain the original traceback. Timeout or an unclassified
+probe failure is temporary unavailability, never proof of engine death. Probes do not initialize models or run inference.
+There is at most one outstanding probe per client; timeout keeps that probe for subsequent observation.
+
+LMDeploy shutdown also preserves an in-flight health call: canceling its coroutine would not stop TurboMind's
+executor worker. Client close waits up to five seconds and raises `TimeoutError` if completion is unconfirmed.
+Keep the supplied Pipeline and its loop alive, then retry closing; a timed-out close is not permission to release
+the engine. Hosts with an outer process-shutdown deadline can use `close_health_probe(timeout=None)` to wait for
+actual drainage before releasing the Pipeline. Stopping the loop or externally canceling the probe first prevents
+the client from confirming drainage.
+
+`await client.aclose()` drains owned HTTP connections or health probes. It does not shut down injected engines/executors,
+kill the host, or rebuild a model. Drain extraction tasks before closing the client. The owning application controls permanent
+failure latching, admission, task cleanup, and replacement. MLX keeps per-model serialization and closes each batch generator;
+an unclassified runtime failure is propagated without claiming that the model is permanently dead.
+
 ## About Output Format
 
 MinerU Vision-Language Model can handle document layout detection and
@@ -410,7 +447,9 @@ async def extract_document(client: MinerUClient, images: list[Image.Image]) -> l
         await client.aclose()
 ```
 
-`MinerUClient.aclose()` closes owned HTTP connections. Engines and executors supplied by the caller remain
+`MinerUClient.aclose()` closes owned HTTP connections and backend health probes. Engines and executors supplied by the caller remain
 caller-owned. Batch failures and cancellation drain child tasks and synchronous image preparation before
 returning, so callers can then release their input images. Canceling an HTTP request does not guarantee that
 the remote server immediately aborts generation.
+
+llama.cpp health reads confirmed loop termination, not generation progress. Cancellation drains native work; SDK users must drain extraction tasks before releasing the injected engine. Native aborts remain the host process manager’s responsibility.

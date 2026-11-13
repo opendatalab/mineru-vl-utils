@@ -2,7 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -81,9 +81,10 @@ def test_mineru_client_close_does_not_own_injected_engine_or_executor() -> None:
     client = object.__new__(MinerUClient)
     engine, executor = Mock(), Mock()
     client.backend = "vllm-async-engine"
-    client.client = SimpleNamespace(vllm_async_llm=engine)
+    client.client = SimpleNamespace(vllm_async_llm=engine, aclose=AsyncMock())
     client.executor = executor
     asyncio.run(client.aclose())
+    client.client.aclose.assert_awaited_once()
     engine.shutdown.assert_not_called()
     executor.shutdown.assert_not_called()
 

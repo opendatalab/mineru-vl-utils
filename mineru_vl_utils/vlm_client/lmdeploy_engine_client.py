@@ -10,6 +10,8 @@ from .batch_errors import BlockPredictionResult, capture_block_error, collect_bl
 from .base_client import (
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_USER_PROMPT,
+    EngineHealth,
+    EngineUnavailableError,
     ImageType,
     SamplingParams,
     ServerError,
@@ -18,9 +20,30 @@ from .base_client import (
     VlmClient,
 )
 from .utils import VLM_PREDICT_DESC, gather_tasks, get_rgb_image, load_resource, run_in_thread_until_complete
+from .lmdeploy_health import LmdeployHealthProbe
+
+
+def _inference_error(outputs: Sequence[Any], message: str) -> ServerError:
+    """优先保留明确引擎故障；其他后端错误也保留原始代码和详情用于诊断。"""
+    errors = [output for output in outputs if getattr(output, "finish_reason", None) == "error"]
+    for output in errors:
+        code = getattr(output, "error_code", None)
+        detail = getattr(output, "error_message", None) or message
+        if code == "engine_unavailable":
+            return EngineUnavailableError(f"{message} [{code}] {detail}", error_code=code, error_message=detail)
+    if errors:
+        code = getattr(errors[0], "error_code", None)
+        detail = getattr(errors[0], "error_message", None)
+        if code or detail:
+            return ServerError(
+                f"{message} [{code or 'unknown'}] {detail or message}", error_code=code, error_message=detail or message
+            )
+    return ServerError(message)
 
 
 class LmdeployEngineVlmClient(VlmClient):
+    health_probe_mode = "sync"
+
     def __init__(
         self,
         lmdeploy_engine,  # LMDeploy 0.17 的公开 Pipeline 实例
@@ -63,6 +86,19 @@ class LmdeployEngineVlmClient(VlmClient):
         self.max_concurrency = max_concurrency
         self.use_tqdm = use_tqdm
         self.debug = debug
+        self._health_probe = LmdeployHealthProbe(lmdeploy_engine)
+
+    def probe_health(self, timeout: float = 5.0) -> EngineHealth:
+        """通过受控适配层读取健康，宿主无需访问 LMDeploy 内部对象。"""
+        return self._health_probe.check(timeout)
+
+    async def aclose(self) -> None:
+        """只排空客户端自有的探测，Pipeline 仍由创建它的宿主负责关闭。"""
+        await run_in_thread_until_complete(self._health_probe.close)
+
+    def close_health_probe(self, timeout: float | None = 5.0) -> None:
+        """同步关闭探测；已有进程关闭期限的宿主可用 None 等待实际排空。"""
+        self._health_probe.close(timeout)
 
     def build_lmdeploy_generation_config(self, sampling_params: SamplingParams | None):
         sp = self.build_sampling_params(sampling_params)
@@ -120,10 +156,16 @@ class LmdeployEngineVlmClient(VlmClient):
             else:
                 raise RuntimeError("Use aio_batch_predict() inside a running event loop")
             # 仅显式容错时逐请求调度，以获得每个块独立的结果与异常。
-            return asyncio.run(self.aio_batch_predict(
-                images, prompts, sampling_params, priority,
-                use_tqdm=self.use_tqdm, tqdm_desc=VLM_PREDICT_DESC,
-            ))
+            return asyncio.run(
+                self.aio_batch_predict(
+                    images,
+                    prompts,
+                    sampling_params,
+                    priority,
+                    use_tqdm=self.use_tqdm,
+                    tqdm_desc=VLM_PREDICT_DESC,
+                )
+            )
         return self._batch_predict(
             images,
             prompts,
@@ -220,7 +262,7 @@ class LmdeployEngineVlmClient(VlmClient):
         if len(outputs) != len(lmdeploy_prompts):
             raise ServerError("LMDeploy returned an unexpected number of responses.")
         if any(getattr(output, "finish_reason", None) == "error" for output in outputs):
-            raise ServerError("LMDeploy inference failed.")
+            raise _inference_error(outputs, "LMDeploy inference failed.")
         return [output.text for output in outputs]
 
     def _predict_with_progress(
@@ -268,7 +310,9 @@ class LmdeployEngineVlmClient(VlmClient):
                     continue  # 中间帧是正常状态，继续等待该请求的终止帧。
                 completed.add(index)
                 if finish_reason == "error":
-                    error = error or ServerError("LMDeploy inference failed.")
+                    current_error = _inference_error((current,), "LMDeploy inference failed.")
+                    if error is None or isinstance(current_error, EngineUnavailableError):
+                        error = current_error
                     continue
                 pbar.update(1)
             # 不提前中断响应迭代，确保错误响应之后的在途请求仍完成本批清理。
@@ -332,24 +376,31 @@ class LmdeployEngineVlmClient(VlmClient):
                 try:
                     return BlockPredictionResult(
                         await self.aio_predict(
-                            image=image, prompt=prompt, sampling_params=sampling_params, priority=priority,
+                            image=image,
+                            prompt=prompt,
+                            sampling_params=sampling_params,
+                            priority=priority,
                         )
                     )
                 except Exception as exc:
                     return capture_block_error(
-                        exc, enabled=getattr(self, "isolate_block_errors", False),
-                        backend=type(self).__name__, index=index,
+                        exc,
+                        enabled=getattr(self, "isolate_block_errors", False),
+                        backend=type(self).__name__,
+                        index=index,
                     )
 
         results = await gather_tasks(
             tasks=[
                 predict_with_semaphore(index, *args)
-                for index, args in enumerate(zip(
-                    images,
-                    prompts,
-                    sampling_params,
-                    priority,
-                ))
+                for index, args in enumerate(
+                    zip(
+                        images,
+                        prompts,
+                        sampling_params,
+                        priority,
+                    )
+                )
             ],
             use_tqdm=use_tqdm,
             tqdm_desc=tqdm_desc,

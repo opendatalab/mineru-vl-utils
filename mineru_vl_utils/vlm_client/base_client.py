@@ -5,6 +5,8 @@ from typing import Literal, Sequence, TypeAlias
 
 from PIL import Image
 
+from .exception_chain import iter_exception_chain
+
 SingleImageType: TypeAlias = Image.Image | bytes | str
 ImageType: TypeAlias = SingleImageType | Sequence[SingleImageType] | None
 
@@ -21,7 +23,34 @@ class RequestError(ValueError):
 
 
 class ServerError(RuntimeError):
-    pass
+    """服务端推理错误，可携带后端原始结构化诊断。"""
+
+    def __init__(self, *args: object, error_code: str | None = None, error_message: str | None = None) -> None:
+        """保留 RuntimeError 的原始参数语义，并附带可选错误码和详情。"""
+        self.error_code = error_code
+        self.error_message = error_message
+        super().__init__(*args)
+
+
+class EngineUnavailableError(ServerError):
+    """后端明确报告实例不可恢复；探测超时不得转换为此异常。"""
+
+    def __init__(self, message: str, *, error_code: str = "engine_unavailable", error_message: str | None = None) -> None:
+        """保留后端原始错误码和详情，异常链仍由调用方正常传播。"""
+        super().__init__(message, error_code=error_code, error_message=error_message or message)
+
+    @classmethod
+    def find_in(cls, error: BaseException) -> "EngineUnavailableError | None":
+        """供宿主和批量容错共用分类规则，识别包装异常及异常组中的明确死亡。"""
+        return next((item for item in iter_exception_chain(error) if isinstance(item, cls)), None)
+
+
+@dataclass(frozen=True)
+class EngineHealth:
+    """区分健康、暂时不可用和明确死亡，避免将探测超时误报为引擎死亡。"""
+
+    state: Literal["healthy", "unavailable", "dead"]
+    message: str = ""
 
 
 class HttpResponseError(ServerError):
@@ -88,6 +117,16 @@ def compute_confidence_metrics(
 
 
 class VlmClient:
+    health_probe_mode: Literal["none", "sync", "async"] = "none"
+
+    def probe_health(self, timeout: float = 5.0) -> EngineHealth:
+        """未提供健康协议的后端显式拒绝，不能伪造健康状态。"""
+        raise UnsupportedError(f"Health probing is not supported by {type(self).__name__}")
+
+    async def aio_probe_health(self, timeout: float = 5.0) -> EngineHealth:
+        """未提供原生异步健康协议时显式拒绝，不隐式创建循环或线程。"""
+        raise UnsupportedError(f"Async health probing is not supported by {type(self).__name__}")
+
     def __init__(
         self,
         *,
