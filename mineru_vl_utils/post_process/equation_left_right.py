@@ -48,54 +48,15 @@ VALID_RIGHT_TOKEN_LIST = [
     "\\right/",
 ]
 
-LEFT_TOKEN_LIST = [
-    r"\\left\\lbrace",
-    r"\\left\\lVert",
-    r"\\left\\lvert",
-    r"\\left\\rvert",
-    r"\\left\\rVert",
-    r"\\left\\vert",
-    r"\\left\\Vert",
-    r"\\left\\lfloor",
-    r"\\left\\lbrack",
-    r"\\left\\langle",
-    r"\\left\|",
-    r"\\left\\\|",
-    r"\\left\[",
-    r"\\left\]",
-    r"\\left\(",
-    r"\\left\\{",
-    r"\\left\\}",
-    r"\\left\.",
-]
+# 从配对使用的定界符生成字面匹配规则，避免两套列表不一致。
+LEFT_TOKEN_LIST = [re.escape(token) for token in VALID_LEFT_TOKEN_LIST]
+RIGHT_TOKEN_LIST = [re.escape(token) for token in VALID_RIGHT_TOKEN_LIST]
 
 
 def count_left(latex):
     pattern = "|".join(LEFT_TOKEN_LIST)
     matches = re.findall(pattern, latex)
     return len(matches)
-
-
-RIGHT_TOKEN_LIST = [
-    r"\\right\\rbrace",
-    r"\\right\\lVert",
-    r"\\right\\lvert",
-    r"\\right\\rvert",
-    r"\\right\\rVert",
-    r"\\right\\vert",
-    r"\\right\\Vert",
-    r"\\right\\rfloor",
-    r"\\right\\rbrack",
-    r"\\right\\rangle",
-    r"\\right\|",
-    r"\\right\\\|",
-    r"\\right\]",
-    r"\\right\[",
-    r"\\right\)",
-    r"\\right\\}",
-    r"\\right\\{",
-    r"\\right.",
-]
 
 
 def count_right(latex):
@@ -369,6 +330,11 @@ def try_match_equation_left_right(latex: str, debug: bool = False) -> str:
         return latex
 
     if not check_align(latex):
+        return latex
+
+    # 未收录或带空格的定界符不能当作缺失；无法完整识别时保留原公式。
+    recognized_starts = {match.start() for match in re.finditer("|".join(LEFT_TOKEN_LIST + RIGHT_TOKEN_LIST), latex)}
+    if any(match.start() not in recognized_starts for match in re.finditer(r"\\(?:left|right)(?![a-zA-Z])", latex)):
         return latex
 
     fixed_latex = fix_left_right_mismatch(latex)
