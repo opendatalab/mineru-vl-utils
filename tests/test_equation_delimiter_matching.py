@@ -1,4 +1,4 @@
-"""Cover delimiter recognition and preserve existing missing-delimiter repairs."""
+"""验证定界符识别，同时保留既有缺失定界符的修复行为。"""
 
 import re
 
@@ -23,12 +23,14 @@ from mineru_vl_utils.structs import ContentBlock
     "actual, valid", [(LEFT_TOKEN_LIST, VALID_LEFT_TOKEN_LIST), (RIGHT_TOKEN_LIST, VALID_RIGHT_TOKEN_LIST)]
 )
 def test_patterns_are_escaped_valid_tokens(actual, valid):
+    """识别正则应直接来自合法定界符列表，防止两者漂移。"""
     assert actual == [re.escape(token) for token in valid]
 
 
 # Every delimiter already declared by the matcher must be recognized in full.
 @pytest.mark.parametrize("token", VALID_LEFT_TOKEN_LIST)
 def test_each_declared_left_delimiter_is_recognized(token):
+    """每种已声明的左定界符都应被完整识别。"""
     assert re.fullmatch("|".join(LEFT_TOKEN_LIST), token)
     assert count_left(token) == 1
     assert count_right(token) == 0
@@ -36,6 +38,7 @@ def test_each_declared_left_delimiter_is_recognized(token):
 
 @pytest.mark.parametrize("token", VALID_RIGHT_TOKEN_LIST)
 def test_each_declared_right_delimiter_is_recognized(token):
+    """每种已声明的右定界符都应被完整识别。"""
     assert re.fullmatch("|".join(RIGHT_TOKEN_LIST), token)
     assert count_right(token) == 1
     assert count_left(token) == 0
@@ -76,6 +79,7 @@ VALID_FORMULAS = [
 
 @pytest.mark.parametrize("latex", VALID_FORMULAS)
 def test_valid_formula_survives_matching_and_full_postprocess(latex):
+    """合法公式经过匹配器和公开后处理入口后不得被误改。"""
     assert try_match_equation_left_right(latex) == latex
     block = ContentBlock("equation", [0.1, 0.1, 0.9, 0.3], content=latex)
     result = post_process(
@@ -93,12 +97,14 @@ def test_valid_formula_survives_matching_and_full_postprocess(latex):
     "command", [r"\rightarrow", r"\rightleftharpoons", r"\rightrightarrows", r"\rightsquigarrow", r"\rightX"]
 )
 def test_other_right_commands_are_not_delimiters(command):
+    """同前缀的箭头等命令不应被当作右定界符。"""
     assert count_right(command) == 0
     assert split_with_left_right(command) == [command]
     assert try_match_equation_left_right(command) == command
 
 
 def test_slash_tokenization_keeps_both_delimiters():
+    """斜线定界符分词应同时保留左右两端。"""
     tokens = [token for token in split_with_left_right(r"\left/ x \right/") if token]
     assert tokens == [r"\left/", " x ", r"\right/"]
 
@@ -119,16 +125,19 @@ def test_slash_tokenization_keeps_both_delimiters():
     ],
 )
 def test_existing_missing_delimiter_repairs_are_preserved(source, expected):
+    """保留既有修复的准确插入位置，而不只检查左右数量。"""
     assert try_match_equation_left_right(source) == expected
     assert count_left(expected) == count_right(expected)
 
 
 @pytest.mark.parametrize("latex", [r"\left( x \end{array}", r"\left( x \begin{array}{c}"])
 def test_incomplete_array_still_returns_original(latex):
+    """数组环境不完整时继续保留原文，避免扩大改写范围。"""
     assert try_match_equation_left_right(latex) == latex
 
 
 def test_simple_mode_keeps_its_existing_behavior():
+    """简单后处理模式维持原有行为，不新增公式修复。"""
     source = r"\left/ x \right/"
     block = ContentBlock("equation", [0.1, 0.1, 0.9, 0.3], content=source)
     result = post_process(
@@ -150,4 +159,5 @@ def test_simple_mode_keeps_its_existing_behavior():
     ],
 )
 def test_missing_repairs_with_arrow_commands(source, expected):
+    """箭头命令不应阻止对已识别定界符执行既有修复。"""
     assert try_match_equation_left_right(source) == expected

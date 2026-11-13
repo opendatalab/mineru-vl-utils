@@ -48,7 +48,7 @@ VALID_RIGHT_TOKEN_LIST = [
     "\\right/",
 ]
 
-# Derive literal match patterns from the delimiters used for pairing.
+# 从配对使用的定界符生成字面匹配规则，避免两套列表不一致。
 LEFT_TOKEN_LIST = [re.escape(token) for token in VALID_LEFT_TOKEN_LIST]
 RIGHT_TOKEN_LIST = [re.escape(token) for token in VALID_RIGHT_TOKEN_LIST]
 
@@ -332,8 +332,7 @@ def try_match_equation_left_right(latex: str, debug: bool = False) -> str:
     if not check_align(latex):
         return latex
 
-    # Unlisted or spaced delimiters (e.g. \right\rceil or \right )) must not
-    # be mistaken for missing delimiters. Preserve formulas we cannot fully tokenize.
+    # 未收录或带空格的定界符不能当作缺失；无法完整识别时保留原公式。
     recognized_starts = {match.start() for match in re.finditer("|".join(LEFT_TOKEN_LIST + RIGHT_TOKEN_LIST), latex)}
     if any(match.start() not in recognized_starts for match in re.finditer(r"\\(?:left|right)(?![a-zA-Z])", latex)):
         return latex
