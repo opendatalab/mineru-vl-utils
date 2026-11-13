@@ -6,6 +6,7 @@ import sys
 from loguru import logger
 import unicodedata
 from collections import Counter
+from itertools import groupby
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
@@ -38,7 +39,8 @@ def split_markdown_row(line: str) -> Optional[List[str]]:
         return None
     if text.startswith("|"):
         text = text[1:]
-    if text.endswith("|"):
+    # A final escaped pipe belongs to the last cell, not the optional table boundary.
+    if text.endswith("|") and (len(text[:-1]) - len(text[:-1].rstrip("\\"))) % 2 == 0:
         text = text[:-1]
 
     cells = []
@@ -81,10 +83,6 @@ def repeated_whole_content(content: str) -> Optional[Tuple[str, int]]:
         if count >= 2:
             return compact[:period], count
     return None
-
-def has_pipe_escape(s: str) -> bool:
-    return r'\|' in s  # 用 raw string 避免自身触发警告
-
 
 def normalize_fragment(fragment: str) -> str:
     return re.sub(r"\s+", " ", fragment).strip().lower()
@@ -163,9 +161,8 @@ def is_noisy_table_row(cells: List[str]) -> bool:
 def validate_content_repetition(content: str) -> List[str]:
     errors = []
 
-    if has_pipe_escape(content):
-        errors.append(f"has_pipe_escape")
-    
+    # Escaped pipes are valid cell content, not evidence of repetition or malformed rows.
+
     for match in re.finditer(r"\n{5,}", content):
         line_no = content[: match.start()].count("\n") + 1
         errors.append(f"content_repetition_newline: {len(match.group(0))} consecutive newlines at line {line_no}")
@@ -247,7 +244,8 @@ def has_pipe_boundaries(line: str) -> bool:
 def normalize_table_source_line(line: str) -> str:
     """Normalize common model table syntax mistakes before parsing."""
     normalized = line.strip().replace("\uff5c", "|").replace("\u00a6", "|")
-    return normalized.replace(r"\|", "|")
+    # Keep cell escapes until row parsing; removing them invents extra columns.
+    return normalized
 
 
 def split_repair_markdown_row(line: str) -> Optional[List[str]]:
@@ -264,7 +262,12 @@ def clean_table_cell(cell: str) -> str:
     cleaned = re.sub(r"\s+", " ", cell.replace("\t", " ")).strip()
     if cleaned.count("`") % 2 == 1:
         cleaned += "`"
-    return cleaned.replace("|", r"\|")
+    # Row parsing retains existing escapes. Only escape previously unescaped pipes when repairing.
+    return re.sub(
+        r"(\\*)\|",
+        lambda match: match.group(1) + ("\\" if len(match.group(1)) % 2 == 0 else "") + "|",
+        cleaned,
+    )
 
 
 def format_markdown_row(cells: List[str]) -> str:
@@ -404,28 +407,51 @@ def extract_largest_legal_markdown_table(content: str) -> str:
     return max(candidates, key=table_score)
 
 
-def repair_content_if_repetition(content: str) -> Tuple[str, List[str]]:
-    errors = validate_content_repetition(content)
-    if not errors:
-        return content, errors
+def restore_whole_table_pipe_escapes(content: str) -> str:
+    """仅恢复结构完整且统一转义的表格，避免全局去转义破坏单元格内容。"""
+    output: List[str] = []
+    # Normal table delimiters end the run, so neighboring valid tables are not rewritten.
+    for escaped, group in groupby(
+        content.splitlines(keepends=True),
+        key=lambda line: r"\|" in line and re.search(r"(?<!\\)\|", line) is None,
+    ):
+        original = list(group)
+        if escaped and len(original) >= 3:
+            # Remove exactly one layer; an overescaped cell pipe must remain a cell pipe.
+            restored = [line.replace(r"\|", "|") for line in original]
+            rows = [split_markdown_row(line) or [] for line in restored]
+            columns = len(rows[0])
+            if (
+                columns >= 2
+                and not is_separator_row(rows[0])
+                and is_separator_row(rows[1])
+                and all(len(row) == columns for row in rows)
+                and not any(is_separator_row(row) for row in rows[2:])
+            ):
+                output.extend(restored)
+                continue
+        output.extend(original)
+    return "".join(output)
 
-    fixed_table = extract_largest_legal_markdown_table(content)
-    return fixed_table or content, errors
+
+def repair_content_if_repetition(content: str) -> Tuple[str, List[str]]:
+    # Recover a complete escaped table before applying the existing repetition rules.
+    restored = restore_whole_table_pipe_escapes(content)
+    pipe_errors = ["has_pipe_escape"] if restored != content else []
+    errors = validate_content_repetition(restored)
+    if not errors:
+        # A successful escape-only repair must not discard surrounding content.
+        return restored, pipe_errors
+
+    fixed_table = extract_largest_legal_markdown_table(restored)
+    return fixed_table or restored, pipe_errors + errors
 
 
 def try_fix_chart_invalid_repetition(content: str, debug: bool = False) -> str:
-
-    errors = validate_content_repetition(content)
+    fixed_content, errors = repair_content_if_repetition(content)
     for error in errors:
         logger.debug(error)
 
-    if errors:
-        fixed_content = extract_largest_legal_markdown_table(content)
-        if not fixed_content:
-            fixed_content = content
-    else:
-        fixed_content = content
-        
     if debug and fixed_content != content:
         logger.debug("Fixed chart markdown from: {} to: {}", fixed_content, content)
         
