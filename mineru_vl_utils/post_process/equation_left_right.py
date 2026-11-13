@@ -158,8 +158,14 @@ def tag_array(node_list):
 
 
 def tag_element(node_list, array_list):
+    """Return one tag per node, preserving the order of node_list.
+
+    Each tag is an (array_id, element_index) tuple or None for an unassigned
+    node. The result always has the same length as node_list, including when
+    array_list is empty.
+    """
     if len(array_list) == 0:
-        return [None]
+        return [None] * len(node_list)
 
     tag2arr = {arr[0]: arr for arr in array_list}
 
