@@ -44,13 +44,16 @@ client = MinerUClient(
 
 The adapter reports confirmed, unrecoverable engine failure as `EngineUnavailableError(ServerError)`.
 vLLM synchronous/asynchronous prediction, scored prediction and scoring preserve the original exception as `__cause__`.
-LMDeploy retains its structured error code and details. Block isolation never suppresses confirmed engine failure, including
+LMDeploy retains its structured error code and details. llama.cpp wraps only native `EngineUnavailableError`
+(including `EngineClosedError`); ordinary native `EngineError` remains a request-level server error. The original
+exception in `__cause__` preserves native `error_type`, `code` and `details`. Block isolation never suppresses confirmed engine failure, including
 wrapped exceptions, exception groups, and a fatal error observed while draining sibling tasks.
 Catch this public exception instead of catching vLLM's native `EngineDeadError` directly. `EngineUnavailableError.find_in(error)`
 also locates the signal in an exception chain or group. Ordinary request failures retain their existing behavior.
 
 | Client | `health_probe_mode` | Supported health method |
 | --- | --- | --- |
+| llama.cpp (`mineru-llama-cpp>=0.2.1`) | `sync` | `probe_health(timeout=5.0)`, native loop state snapshot |
 | LMDeploy | `sync` | `probe_health(timeout=5.0)` |
 | vLLM AsyncLLM | `async` | `await aio_probe_health(timeout=5.0)` on the owning loop |
 | vLLM LLM / MLX / other clients | `none` | Explicit `UnsupportedError` |
@@ -439,3 +442,5 @@ async def extract_document(client: MinerUClient, images: list[Image.Image]) -> l
 caller-owned. Batch failures and cancellation drain child tasks and synchronous image preparation before
 returning, so callers can then release their input images. Canceling an HTTP request does not guarantee that
 the remote server immediately aborts generation.
+
+llama.cpp health reads confirmed loop termination, not generation progress. Cancellation drains native work; SDK users must drain extraction tasks before releasing the injected engine. Native aborts remain the host process manager’s responsibility.
